@@ -1,0 +1,13 @@
+{
+  "name": "VIP Digital ID",
+  "short_name": "VIP Digital ID",
+  "lang": "en",
+  "dir": "ltr",
+  "start_url": "/?lang=en",
+  "display": "standalone",
+  "background_color": "#090b0e",
+  "theme_color": "#090b0e",
+  "icons": [
+    { "src": "/brand/logo-icon.webp", "sizes": "512x512", "type": "image/webp", "purpose": "any maskable" }
+  ]
+}

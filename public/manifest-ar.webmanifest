@@ -1,0 +1,13 @@
+{
+  "name": "الهوية الرقمية لكبار الشخصيات",
+  "short_name": "الهوية الرقمية",
+  "lang": "ar",
+  "dir": "rtl",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#090b0e",
+  "theme_color": "#090b0e",
+  "icons": [
+    { "src": "/brand/logo-icon.webp", "sizes": "512x512", "type": "image/webp", "purpose": "any maskable" }
+  ]
+}
