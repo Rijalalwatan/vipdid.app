@@ -11,7 +11,7 @@
     {
       "binding": "DB",
       "database_name": "vipdid-platform",
-      "database_id": "__D1_DATABASE_ID__"
+      "database_id": "be117780-1c27-46c2-8f6d-d3aa03bc09c0"
     }
   ],
   "r2_buckets": [
@@ -23,7 +23,7 @@
   "kv_namespaces": [
     {
       "binding": "RATE_LIMIT",
-      "id": "__KV_NAMESPACE_ID__"
+      "id": "40fc6c20795c49a09e64b5a429511046"
     }
   ],
   "services": [
