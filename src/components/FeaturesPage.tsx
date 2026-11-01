@@ -8,13 +8,16 @@ export function FeaturesPage({ text, onNavigate }: Props) {
   const items = [
     { id: 'visitor', label: text.visitor },
     { id: 'member', label: text.member },
-    { id: 'partner', label: text.partner },
-    { id: 'oversight', label: text.oversight }
+    { id: 'marketer', label: text.marketer },
+    { id: 'adheed', label: text.adheed },
+    { id: 'oversight', label: text.oversight },
+    { id: 'feature-article', label: text.articlePill }
   ];
   const cards = [
     { id: 'visitor', title: text.visitorTitle, body: text.visitorBody },
     { id: 'member', title: text.memberTitle, body: text.memberBody },
-    { id: 'partner', title: text.partnerTitle, body: text.partnerBody },
+    { id: 'marketer', title: text.marketerTitle, body: text.marketerBody },
+    { id: 'adheed', title: text.adheedTitle, body: text.adheedBody },
     { id: 'oversight', title: text.oversightTitle, body: text.oversightBody }
   ];
   return (

@@ -17,22 +17,32 @@ export function HomePage({ locale, text, isLocked, onUnlocked, onNavigate }: Pro
   const [intent, setIntent] = useState<'member' | 'management'>('member');
   const [searching, setSearching] = useState(false);
 
-  const performSearch = async (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
+  const runSearch = async (featuredFilter = featured) => {
     setSearching(true);
     setSearchError(false);
     try {
-      const params = new URLSearchParams({ q: query, featured: featured ? '1' : '0' });
+      const params = new URLSearchParams({ q: query, featured: featuredFilter ? '1' : '0' });
       const response = await fetch(`/api/public/search?${params.toString()}`, { credentials: 'same-origin' });
       if (!response.ok) throw new Error('search');
       const data = await response.json() as { results: SearchResult[] };
       setResults(data.results);
+      window.setTimeout(() => jumpToSection('search-results'), 0);
     } catch {
       setSearchError(true);
       setResults(null);
     } finally {
       setSearching(false);
     }
+  };
+
+  const performSearch = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    void runSearch();
+  };
+
+  const selectFilter = (nextFeatured: boolean) => {
+    setFeatured(nextFeatured);
+    void runSearch(nextFeatured);
   };
 
   const requestAccess = (nextIntent: 'member' | 'management') => {
@@ -61,13 +71,13 @@ export function HomePage({ locale, text, isLocked, onUnlocked, onNavigate }: Pro
         <div className="advanced-wrap">
           <button className="pill-button" type="button" onClick={() => setAdvanced((value) => !value)}>{advanced ? text.hideAdvancedAction : text.advancedAction}</button>
           {advanced ? <div className="filter-pills" aria-label={text.advancedAction}>
-            <button type="button" className={!featured ? 'is-active' : ''} onClick={() => setFeatured(false)}>{text.allPublished}</button>
-            <button type="button" className={featured ? 'is-active' : ''} onClick={() => setFeatured(true)}>{text.featuredOnly}</button>
+            <button type="button" className={!featured ? 'is-active' : ''} onClick={() => selectFilter(false)}>{text.allPublished}</button>
+            <button type="button" className={featured ? 'is-active' : ''} onClick={() => selectFilter(true)}>{text.featuredOnly}</button>
             <span>{text.latestFirst}</span>
           </div> : null}
         </div>
         {searchError ? <p className="search-message" role="alert">{text.searchUnavailable}</p> : null}
-        {results ? <div className="search-results" aria-live="polite"><h3>{text.resultsTitle}</h3>{results.length ? results.map((result) => <article className="result-card" key={result.slug}><span>{result.featured ? text.featuredOnly : text.allPublished}</span><h4>{result.name}</h4>{result.title ? <p className="result-title">{result.title}</p> : null}{result.summary ? <p>{result.summary}</p> : null}</article>) : <p className="search-message">{text.noSearchResults}</p>}</div> : null}
+        {results ? <div className="search-results" id="search-results" aria-live="polite"><h3>{text.resultsTitle}</h3>{results.length ? results.map((result) => <article className="result-card" key={result.slug}><span>{result.featured ? text.featuredOnly : text.allPublished}</span><h4>{result.name}</h4>{result.title ? <p className="result-title">{result.title}</p> : null}{result.summary ? <p>{result.summary}</p> : null}</article>) : <p className="search-message">{text.noSearchResults}</p>}</div> : null}
       </section>
 
       <section className="action-grid" aria-label={text.navAccess}>
