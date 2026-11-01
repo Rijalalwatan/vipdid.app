@@ -65,6 +65,15 @@ export function App() {
     setRoute(nextRoute);
     window.scrollTo({ top: 0, behavior: 'smooth' });
   };
+  const openAccess = () => {
+    if (route !== '/') {
+      window.history.pushState({}, '', '/');
+      setRoute('/');
+      window.setTimeout(() => document.getElementById('access')?.scrollIntoView({ behavior: 'smooth', block: 'center' }), 0);
+      return;
+    }
+    document.getElementById('access')?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  };
 
   return (
     <main className={`app-shell locale-${locale} theme-${theme}`}>
@@ -73,8 +82,10 @@ export function App() {
         locale={locale}
         languageLabel={language.text.languageAction}
         themeLabel={theme === 'dark' ? language.text.themeToLight : language.text.themeToDark}
+        accessLabel={language.text.topAccess}
         onLanguageToggle={() => setLocale((current) => current === 'ar' ? 'en' : 'ar')}
         onThemeToggle={() => setTheme((current) => current === 'dark' ? 'light' : 'dark')}
+        onAccess={openAccess}
       />
       {route === '/' ? (
         <HomePage locale={locale} text={language.text} isLocked={isLocked !== false} onUnlocked={() => setIsLocked(false)} onNavigate={navigate} />

@@ -2,7 +2,7 @@ import { FormEvent, useState } from 'react';
 import { platformConfig } from '../config/platform.config';
 import type { Copy, Locale } from '../i18n/content';
 import { LockGateway } from './LockGateway';
-import { EmblemCover, ScrollPills, jumpToSection } from './SiteChrome';
+import { PlatformMasthead, ScrollPills, jumpToSection } from './SiteChrome';
 
 type Route = '/' | '/features' | '/privacy' | '/terms';
 type SearchResult = { slug: string; name: string; title: string; summary: string; featured: boolean };
@@ -59,7 +59,7 @@ export function HomePage({ locale, text, isLocked, onUnlocked, onNavigate }: Pro
 
   return (
     <div className="site-page home-page">
-      <EmblemCover eyebrow={text.heroEyebrow} title={text.heroTitle} description={text.heroDescription} />
+      <PlatformMasthead eyebrow={text.heroEyebrow} title={text.heroTitle} description={text.heroDescription} />
       <ScrollPills items={jumpItems} />
 
       <section className="section-panel discovery-section" id="discover" aria-labelledby="search-title">

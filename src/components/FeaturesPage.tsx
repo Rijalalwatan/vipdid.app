@@ -1,5 +1,5 @@
 import type { Copy, Locale } from '../i18n/content';
-import { EmblemCover, ScrollPills } from './SiteChrome';
+import { PlatformMasthead, ScrollPills } from './SiteChrome';
 
 type Route = '/' | '/features' | '/privacy' | '/terms';
 type Props = { locale: Locale; text: Copy; onNavigate: (route: Route) => void };
@@ -22,7 +22,7 @@ export function FeaturesPage({ text, onNavigate }: Props) {
   ];
   return (
     <div className="site-page features-page">
-      <EmblemCover eyebrow={text.featureEyebrow} title={text.featureTitle} description={text.featureDescription} />
+      <PlatformMasthead compact eyebrow={text.featureEyebrow} title={text.featureTitle} description={text.featureDescription} />
       <ScrollPills items={items} />
       <section className="feature-cards" aria-label={text.features}>
         {cards.map((card, index) => <article className="feature-card" id={card.id} key={card.id}><span>{String(index + 1).padStart(2, '0')}</span><h2>{card.title}</h2><p>{card.body}</p></article>)}
