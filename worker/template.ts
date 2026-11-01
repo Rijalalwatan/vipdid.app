@@ -4,10 +4,11 @@ interface Env {
   RATE_LIMIT: KVNamespace;
   MAILER: Fetcher;
   SESSION_SIGNING_KEY: string;
-  RESEND_API_KEY?: string;
 }
 
 type StaticAsset = { body: string; type: string; immutable: boolean };
+type SearchRow = { slug: string; published_json: string | null; featured_until: number | null };
+type PublicResult = { slug: string; name: string; title: string; summary: string; featured: boolean };
 declare const __STATIC_ASSETS__: Record<string, StaticAsset>;
 const STATIC_ASSETS: Record<string, StaticAsset> = __STATIC_ASSETS__;
 const encoder = new TextEncoder();
@@ -35,7 +36,7 @@ async function digest(value: string) {
 function equal(left: Uint8Array, right: Uint8Array) {
   if (left.byteLength !== right.byteLength) return false;
   let comparison = 0;
-  for (let index = 0; index < left.byteLength; index += 1) comparison |= left[index] ^ right[index];
+  for (let index = 0; index < left.length; index += 1) comparison |= left[index] ^ right[index];
   return comparison === 0;
 }
 
@@ -100,6 +101,48 @@ async function unlock(request: Request, env: Env) {
   return responseJson({ ok: true, locked: false }, 200, { 'set-cookie': `vipdid_access=${token}; Path=/; Max-Age=43200; HttpOnly; Secure; SameSite=Lax` });
 }
 
+function record(value: unknown): Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {};
+}
+
+function textField(source: Record<string, unknown>, names: string[]) {
+  for (const name of names) {
+    const value = source[name];
+    if (typeof value === 'string' && value.trim()) return value.trim().slice(0, 220);
+  }
+  return '';
+}
+
+function publicResult(row: SearchRow): PublicResult {
+  let profile: Record<string, unknown> = {};
+  try { profile = record(row.published_json ? JSON.parse(row.published_json) : {}); } catch { profile = {}; }
+  return {
+    slug: row.slug,
+    name: textField(profile, ['name', 'displayName', 'name_ar', 'name_en']) || row.slug,
+    title: textField(profile, ['title', 'headline', 'title_ar', 'title_en']),
+    summary: textField(profile, ['summary', 'description', 'bio', 'summary_ar', 'summary_en']),
+    featured: Boolean(row.featured_until && row.featured_until > Date.now())
+  };
+}
+
+async function publicSearch(request: Request, env: Env) {
+  const url = new URL(request.url);
+  const query = (url.searchParams.get('q') ?? '').trim().slice(0, 80).toLowerCase();
+  const featured = url.searchParams.get('featured') === '1';
+  const conditions = ['is_published = 1', 'allow_search_indexing = 1'];
+  const values: (string | number)[] = [];
+  if (featured) { conditions.push('(featured_until IS NOT NULL AND featured_until > ?)'); values.push(Date.now()); }
+  if (query) {
+    conditions.push('(lower(slug) LIKE ? OR lower(COALESCE(published_json, \'\')) LIKE ?)');
+    const phrase = `%${query.replace(/[\\%_]/g, '\\$&')}%`;
+    values.push(phrase, phrase);
+  }
+  const sql = `SELECT slug, published_json, featured_until FROM profiles WHERE ${conditions.join(' AND ')} ORDER BY featured_until DESC, updated_at DESC LIMIT 20`;
+  const statement = env.DB.prepare(sql).bind(...values);
+  const response = await statement.all<SearchRow>();
+  return responseJson({ results: (response.results ?? []).map(publicResult) });
+}
+
 function staticAsset(pathname: string) {
   const key = pathname === '/' ? 'index.html' : pathname.slice(1);
   const asset = STATIC_ASSETS[key];
@@ -115,13 +158,13 @@ export default {
       'strict-transport-security': 'max-age=31536000; includeSubDomains; preload',
       'referrer-policy': 'strict-origin-when-cross-origin',
       'x-content-type-options': 'nosniff',
-      'x-frame-options': 'SAMEORIGIN',
       'permissions-policy': 'camera=(), microphone=(), geolocation=()'
     };
     if (url.pathname === '/api/health') return responseJson({ ok: true, service: 'vipdid' }, 200, securityHeaders);
     if (url.pathname === '/api/lock/status' && request.method === 'GET') return responseJson({ locked: await locked(request, env) }, 200, securityHeaders);
     if (url.pathname === '/api/lock/unlock' && request.method === 'POST') return unlock(request, env);
-    const asset = staticAsset(url.pathname);
+    if (url.pathname === '/api/public/search' && request.method === 'GET') return publicSearch(request, env);
+    const asset = staticAsset(url.pathname) ?? (request.method === 'GET' && ['/', '/features', '/privacy', '/terms'].includes(url.pathname) ? staticAsset('/') : null);
     if (asset) {
       Object.entries(securityHeaders).forEach(([key, value]) => asset.headers.set(key, value));
       return asset;
