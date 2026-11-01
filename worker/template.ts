@@ -2,6 +2,7 @@ interface Env {
   DB: D1Database;
   MEDIA: R2Bucket;
   RATE_LIMIT: KVNamespace;
+  MAILER: Fetcher;
   SESSION_SIGNING_KEY: string;
   RESEND_API_KEY?: string;
 }

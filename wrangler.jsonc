@@ -25,5 +25,12 @@
       "binding": "RATE_LIMIT",
       "id": "__KV_NAMESPACE_ID__"
     }
+  ],
+  "services": [
+    {
+      "binding": "MAILER",
+      "service": "saudi-cv-email-failover",
+      "entrypoint": "PlatformMailer"
+    }
   ]
 }
