@@ -38,6 +38,10 @@ CREATE TABLE IF NOT EXISTS users (
   phone TEXT,
   whatsapp TEXT,
   pin_hash TEXT,
+  pin_salt TEXT,
+  email_verified_at INTEGER,
+  pin_set_at INTEGER,
+  last_login_at INTEGER,
   role TEXT NOT NULL CHECK(role IN ('user', 'moderator', 'adheed', 'super_admin')),
   is_managed INTEGER NOT NULL DEFAULT 0 CHECK(is_managed IN (0, 1)),
   managed_by_user_id TEXT REFERENCES users(id),
@@ -50,6 +54,8 @@ CREATE TABLE IF NOT EXISTS users (
   failed_login_attempts INTEGER NOT NULL DEFAULT 0 CHECK(failed_login_attempts >= 0),
   locked_until INTEGER,
   terms_accepted_at INTEGER NOT NULL,
+  privacy_accepted_at INTEGER,
+  eligibility_acknowledged_at INTEGER,
   created_at INTEGER NOT NULL
 );
 
@@ -119,9 +125,49 @@ CREATE TABLE IF NOT EXISTS audit_logs (
   created_at INTEGER NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS auth_challenges (
+  id TEXT PRIMARY KEY,
+  user_id TEXT REFERENCES users(id),
+  email TEXT NOT NULL COLLATE NOCASE,
+  purpose TEXT NOT NULL CHECK(purpose IN ('registration', 'login', 'owner_setup')),
+  code_hash TEXT NOT NULL,
+  code_salt TEXT NOT NULL,
+  locale TEXT NOT NULL CHECK(locale IN ('ar', 'en')),
+  attempts INTEGER NOT NULL DEFAULT 0 CHECK(attempts >= 0),
+  max_attempts INTEGER NOT NULL DEFAULT 6 CHECK(max_attempts BETWEEN 1 AND 10),
+  expires_at INTEGER NOT NULL,
+  consumed_at INTEGER,
+  requested_ip_hash TEXT NOT NULL,
+  created_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS trusted_devices (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL REFERENCES users(id),
+  token_hash TEXT NOT NULL UNIQUE,
+  last_used_at INTEGER NOT NULL,
+  expires_at INTEGER NOT NULL,
+  revoked_at INTEGER,
+  created_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS auth_sessions (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL REFERENCES users(id),
+  token_hash TEXT NOT NULL UNIQUE,
+  trusted_device_id TEXT REFERENCES trusted_devices(id),
+  expires_at INTEGER NOT NULL,
+  last_seen_at INTEGER NOT NULL,
+  revoked_at INTEGER,
+  created_at INTEGER NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_users_tenant_status ON users(tenant_id, status);
 CREATE INDEX IF NOT EXISTS idx_profiles_tenant_slug ON profiles(tenant_id, slug);
 CREATE INDEX IF NOT EXISTS idx_publish_requests_tenant_status ON publish_requests(tenant_id, status, submitted_at);
 CREATE INDEX IF NOT EXISTS idx_media_assets_profile ON media_assets(profile_id, category);
 CREATE INDEX IF NOT EXISTS idx_ledger_entries_created_at ON ledger_entries(created_at);
 CREATE INDEX IF NOT EXISTS idx_audit_logs_tenant_created_at ON audit_logs(tenant_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_auth_challenges_email_purpose ON auth_challenges(email, purpose, expires_at);
+CREATE INDEX IF NOT EXISTS idx_trusted_devices_user_active ON trusted_devices(user_id, expires_at);
+CREATE INDEX IF NOT EXISTS idx_auth_sessions_token_active ON auth_sessions(token_hash, expires_at);

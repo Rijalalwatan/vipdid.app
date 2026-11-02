@@ -89,6 +89,8 @@ function scrollToSection(id: string) {
   const target = document.getElementById(id);
   if (!target) return;
   target.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  if (!target.hasAttribute('tabindex')) target.tabIndex = -1;
+  target.focus({ preventScroll: true });
   target.classList.remove('target-pulse');
   window.requestAnimationFrame(() => target.classList.add('target-pulse'));
   window.setTimeout(() => target.classList.remove('target-pulse'), 950);

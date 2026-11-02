@@ -4,171 +4,109 @@ interface Env {
   RATE_LIMIT: KVNamespace;
   MAILER: Fetcher;
   SESSION_SIGNING_KEY: string;
+  TURNSTILE_SECRET_KEY: string;
 }
 
+type Locale = 'ar' | 'en';
 type StaticAsset = { body: string; type: string; immutable: boolean };
 type SearchRow = { slug: string; published_json: string | null; featured_until: number | null };
 type PublicResult = { slug: string; name: string; title: string; summary: string; featured: boolean };
+type UserRow = { id: string; permanent_id: string; name: string; role: 'user' | 'moderator' | 'adheed' | 'super_admin'; wallet_balance: number; email_verified_at: number | null; status: string; pin_hash: string | null; pin_salt: string | null; failed_login_attempts: number; locked_until: number | null };
+type ChallengeRow = { id: string; user_id: string | null; code_hash: string; code_salt: string; expires_at: number; attempts: number; max_attempts: number };
 declare const __STATIC_ASSETS__: Record<string, StaticAsset>;
+
 const STATIC_ASSETS: Record<string, StaticAsset> = __STATIC_ASSETS__;
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
+const OWNER_EMAIL = 'rijalalwatan.com@gmail.com';
+const SESSION_SECONDS = 60 * 60 * 24;
+const DEVICE_SECONDS = 60 * 60 * 24 * 30;
+const CHALLENGE_MS = 10 * 60 * 1000;
+const securityHeaders = {
+  'strict-transport-security': 'max-age=31536000; includeSubDomains; preload',
+  'referrer-policy': 'strict-origin-when-cross-origin',
+  'x-content-type-options': 'nosniff',
+  'permissions-policy': 'camera=(), microphone=(self), geolocation=()',
+  'content-security-policy': "default-src 'self'; script-src 'self' https://challenges.cloudflare.com; style-src 'self' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self' https://challenges.cloudflare.com; frame-src https://challenges.cloudflare.com; object-src 'none'; base-uri 'self'; form-action 'self'"
+};
 
 function responseJson(data: unknown, status = 200, headers: HeadersInit = {}) {
-  return new Response(JSON.stringify(data), { status, headers: { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store', ...headers } });
+  return new Response(JSON.stringify(data), { status, headers: { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store', ...securityHeaders, ...headers } });
 }
+function secure(response: Response) { Object.entries(securityHeaders).forEach(([key, value]) => response.headers.set(key, value)); return response; }
+function fromBase64(value: string) { const binary = atob(value.replace(/-/g, '+').replace(/_/g, '/')); return Uint8Array.from(binary, (character) => character.charCodeAt(0)); }
+function toBase64Url(bytes: Uint8Array) { let binary = ''; for (const byte of bytes) binary += String.fromCharCode(byte); return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, ''); }
+function toBase64(bytes: Uint8Array) { let binary = ''; for (const byte of bytes) binary += String.fromCharCode(byte); return btoa(binary); }
+function randomToken(size = 32) { const bytes = new Uint8Array(size); crypto.getRandomValues(bytes); return toBase64Url(bytes); }
+function randomCode() { const values = new Uint32Array(1); let value = 0; do { crypto.getRandomValues(values); value = values[0]; } while (value >= 4294000000); return String(value % 1000000).padStart(6, '0'); }
+async function digest(value: string) { return new Uint8Array(await crypto.subtle.digest('SHA-256', encoder.encode(value))); }
+async function hashed(value: string) { return toBase64(await digest(value)); }
+function equal(left: Uint8Array, right: Uint8Array) { if (left.byteLength !== right.byteLength) return false; let comparison = 0; for (let index = 0; index < left.length; index += 1) comparison |= left[index] ^ right[index]; return comparison === 0; }
+async function deriveSecretHash(value: string, salt: string) { const key = await crypto.subtle.importKey('raw', encoder.encode(value), 'PBKDF2', false, ['deriveBits']); const bits = await crypto.subtle.deriveBits({ name: 'PBKDF2', hash: 'SHA-256', salt: fromBase64(salt), iterations: 210000 }, key, 256); return new Uint8Array(bits); }
+async function sign(value: string, secret: string) { const key = await crypto.subtle.importKey('raw', encoder.encode(secret), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']); return toBase64Url(new Uint8Array(await crypto.subtle.sign('HMAC', key, encoder.encode(value)))); }
+function localeOf(value: unknown): Locale { return value === 'en' ? 'en' : 'ar'; }
+function emailOf(value: unknown) { const email = typeof value === 'string' ? value.trim().toLowerCase() : ''; return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) && email.length <= 254 ? email : null; }
+function phoneOf(value: unknown) { const phone = typeof value === 'string' ? value.trim() : ''; return !phone || (/^[0-9+()\s-]{5,28}$/.test(phone) ? phone : null); }
+function pinOf(value: unknown) { return typeof value === 'string' && /^\d{6}$/.test(value) ? value : null; }
+function cookie(request: Request, name: string) { return request.headers.get('cookie')?.match(new RegExp(`(?:^|;\\s*)${name}=([^;]+)`))?.[1] ?? null; }
+function sessionCookie(value: string) { return `vipdid_session=${value}; Path=/; Max-Age=${SESSION_SECONDS}; HttpOnly; Secure; SameSite=None`; }
+function deviceCookie(value: string) { return `vipdid_device=${value}; Path=/; Max-Age=${DEVICE_SECONDS}; HttpOnly; Secure; SameSite=None`; }
+function clearCookie(name: string) { return `${name}=; Path=/; Max-Age=0; HttpOnly; Secure; SameSite=None`; }
+function withCookies(response: Response, values: string[]) { values.forEach((value) => response.headers.append('set-cookie', value)); return response; }
+function sameOrigin(request: Request) { const origin = request.headers.get('origin'); return !origin || origin === new URL(request.url).origin; }
+function record(value: unknown): Record<string, unknown> { return value !== null && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {}; }
+function textField(source: Record<string, unknown>, names: string[]) { for (const name of names) { const value = source[name]; if (typeof value === 'string' && value.trim()) return value.trim().slice(0, 220); } return ''; }
+function publicResult(row: SearchRow): PublicResult { let profile: Record<string, unknown> = {}; try { profile = record(row.published_json ? JSON.parse(row.published_json) : {}); } catch { profile = {}; } return { slug: row.slug, name: textField(profile, ['name', 'displayName', 'name_ar', 'name_en']) || row.slug, title: textField(profile, ['title', 'headline', 'title_ar', 'title_en']), summary: textField(profile, ['summary', 'description', 'bio', 'summary_ar', 'summary_en']), featured: Boolean(row.featured_until && row.featured_until > Date.now()) }; }
+function userView(user: UserRow) { return { id: user.id, permanentId: user.permanent_id, name: user.name, role: user.role, walletBalance: user.wallet_balance, verified: Boolean(user.email_verified_at) }; }
 
-function fromBase64(value: string) {
-  const binary = atob(value.replace(/-/g, '+').replace(/_/g, '/'));
-  return Uint8Array.from(binary, (character) => character.charCodeAt(0));
-}
+async function setting(env: Env, key: string) { return (await env.DB.prepare('SELECT value FROM system_settings WHERE key = ?').bind(key).first<{ value: string }>())?.value ?? null; }
+async function hasAccess(request: Request, env: Env) { const value = cookie(request, 'vipdid_access'); if (!value) return false; const [payload, signature] = value.split('.'); if (!payload || !signature || !equal(encoder.encode(await sign(payload, env.SESSION_SIGNING_KEY)), encoder.encode(signature))) return false; try { const decoded = JSON.parse(decoder.decode(fromBase64(payload))) as { expiresAt?: number }; return typeof decoded.expiresAt === 'number' && decoded.expiresAt > Date.now(); } catch { return false; } }
+async function locked(request: Request, env: Env) { return (await setting(env, 'site_lock_enabled')) === '1' && !(await hasAccess(request, env)); }
+async function limited(env: Env, request: Request, label: string, email: string, maximum: number, seconds: number) { const ip = request.headers.get('CF-Connecting-IP') ?? 'unknown'; const key = `auth:${label}:${toBase64Url(await digest(`${ip}:${email}`)).slice(0, 30)}`; const count = Number(await env.RATE_LIMIT.get(key) ?? '0'); if (count >= maximum) return true; await env.RATE_LIMIT.put(key, String(count + 1), { expirationTtl: seconds }); return false; }
+async function clearLimit(env: Env, request: Request, label: string, email: string) { const ip = request.headers.get('CF-Connecting-IP') ?? 'unknown'; const key = `auth:${label}:${toBase64Url(await digest(`${ip}:${email}`)).slice(0, 30)}`; await env.RATE_LIMIT.delete(key); }
+async function publicSearch(request: Request, env: Env) { const url = new URL(request.url); const query = (url.searchParams.get('q') ?? '').trim().slice(0, 80).toLowerCase(); const featured = url.searchParams.get('featured') === '1'; const conditions = ['is_published = 1', 'allow_search_indexing = 1']; const values: (string | number)[] = []; if (featured) { conditions.push('(featured_until IS NOT NULL AND featured_until > ?)'); values.push(Date.now()); } if (query) { conditions.push('(lower(slug) LIKE ? OR lower(COALESCE(published_json, \'\')) LIKE ?)'); const phrase = `%${query.replace(/[\\%_]/g, '\\$&')}%`; values.push(phrase, phrase); } const sql = `SELECT slug, published_json, featured_until FROM profiles WHERE ${conditions.join(' AND ')} ORDER BY featured_until DESC, updated_at DESC LIMIT 20`; const response = await env.DB.prepare(sql).bind(...values).all<SearchRow>(); return responseJson({ results: (response.results ?? []).map(publicResult) }); }
 
-function toBase64Url(bytes: Uint8Array) {
-  let binary = '';
-  for (const byte of bytes) binary += String.fromCharCode(byte);
-  return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
-}
-
-async function digest(value: string) {
-  return new Uint8Array(await crypto.subtle.digest('SHA-256', encoder.encode(value)));
-}
-
-function equal(left: Uint8Array, right: Uint8Array) {
-  if (left.byteLength !== right.byteLength) return false;
-  let comparison = 0;
-  for (let index = 0; index < left.length; index += 1) comparison |= left[index] ^ right[index];
-  return comparison === 0;
-}
-
-async function derivePasswordHash(password: string, salt: string) {
-  const key = await crypto.subtle.importKey('raw', encoder.encode(password), 'PBKDF2', false, ['deriveBits']);
-  const bits = await crypto.subtle.deriveBits({ name: 'PBKDF2', hash: 'SHA-256', salt: fromBase64(salt), iterations: 210000 }, key, 256);
-  return new Uint8Array(bits);
-}
-
-async function sign(value: string, secret: string) {
-  const key = await crypto.subtle.importKey('raw', encoder.encode(secret), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
-  return toBase64Url(new Uint8Array(await crypto.subtle.sign('HMAC', key, encoder.encode(value))));
-}
-
-async function hasAccess(request: Request, env: Env) {
-  const value = request.headers.get('cookie')?.match(/(?:^|;\s*)vipdid_access=([^;]+)/)?.[1];
-  if (!value) return false;
-  const [payload, signature] = value.split('.');
-  if (!payload || !signature || !equal(encoder.encode(await sign(payload, env.SESSION_SIGNING_KEY)), encoder.encode(signature))) return false;
-  try {
-    const decoded = JSON.parse(decoder.decode(fromBase64(payload))) as { expiresAt?: number };
-    return typeof decoded.expiresAt === 'number' && decoded.expiresAt > Date.now();
-  } catch {
-    return false;
-  }
-}
-
-async function setting(env: Env, key: string) {
-  const result = await env.DB.prepare('SELECT value FROM system_settings WHERE key = ?').bind(key).first<{ value: string }>();
-  return result?.value ?? null;
-}
-
-async function locked(request: Request, env: Env) {
-  const enabled = await setting(env, 'site_lock_enabled');
-  return enabled === '1' && !(await hasAccess(request, env));
-}
-
-async function rateLimitKey(request: Request) {
-  const ip = request.headers.get('CF-Connecting-IP') ?? 'unknown';
-  return `lock:${toBase64Url(await digest(ip)).slice(0, 24)}`;
-}
-
-async function unlock(request: Request, env: Env) {
-  const rateKey = await rateLimitKey(request);
-  const current = Number(await env.RATE_LIMIT.get(rateKey) ?? '0');
-  if (current >= 5) return responseJson({ ok: false, reason: 'limited' }, 429);
-  const body = await request.json<{ password?: string }>().catch(() => ({} as { password?: string }));
-  const [enabled, expectedHash, salt] = await Promise.all([
-    setting(env, 'site_lock_enabled'),
-    setting(env, 'site_lock_password_hash'),
-    setting(env, 'site_lock_password_salt')
-  ]);
-  if (enabled !== '1') return responseJson({ ok: true, locked: false });
-  const verified = Boolean(body.password && expectedHash && salt && equal(await derivePasswordHash(body.password, salt), fromBase64(expectedHash)));
-  if (!verified) {
-    await env.RATE_LIMIT.put(rateKey, String(current + 1), { expirationTtl: 900 });
-    return responseJson({ ok: false, reason: 'invalid' }, 401);
-  }
-  await env.RATE_LIMIT.delete(rateKey);
-  const payload = toBase64Url(encoder.encode(JSON.stringify({ expiresAt: Date.now() + 43200000 })));
-  const token = `${payload}.${await sign(payload, env.SESSION_SIGNING_KEY)}`;
-  return responseJson({ ok: true, locked: false }, 200, { 'set-cookie': `vipdid_access=${token}; Path=/; Max-Age=43200; HttpOnly; Secure; SameSite=Lax` });
-}
-
-function record(value: unknown): Record<string, unknown> {
-  return value !== null && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {};
-}
-
-function textField(source: Record<string, unknown>, names: string[]) {
-  for (const name of names) {
-    const value = source[name];
-    if (typeof value === 'string' && value.trim()) return value.trim().slice(0, 220);
-  }
-  return '';
-}
-
-function publicResult(row: SearchRow): PublicResult {
-  let profile: Record<string, unknown> = {};
-  try { profile = record(row.published_json ? JSON.parse(row.published_json) : {}); } catch { profile = {}; }
-  return {
-    slug: row.slug,
-    name: textField(profile, ['name', 'displayName', 'name_ar', 'name_en']) || row.slug,
-    title: textField(profile, ['title', 'headline', 'title_ar', 'title_en']),
-    summary: textField(profile, ['summary', 'description', 'bio', 'summary_ar', 'summary_en']),
-    featured: Boolean(row.featured_until && row.featured_until > Date.now())
-  };
-}
-
-async function publicSearch(request: Request, env: Env) {
-  const url = new URL(request.url);
-  const query = (url.searchParams.get('q') ?? '').trim().slice(0, 80).toLowerCase();
-  const featured = url.searchParams.get('featured') === '1';
-  const conditions = ['is_published = 1', 'allow_search_indexing = 1'];
-  const values: (string | number)[] = [];
-  if (featured) { conditions.push('(featured_until IS NOT NULL AND featured_until > ?)'); values.push(Date.now()); }
-  if (query) {
-    conditions.push('(lower(slug) LIKE ? OR lower(COALESCE(published_json, \'\')) LIKE ?)');
-    const phrase = `%${query.replace(/[\\%_]/g, '\\$&')}%`;
-    values.push(phrase, phrase);
-  }
-  const sql = `SELECT slug, published_json, featured_until FROM profiles WHERE ${conditions.join(' AND ')} ORDER BY featured_until DESC, updated_at DESC LIMIT 20`;
-  const statement = env.DB.prepare(sql).bind(...values);
-  const response = await statement.all<SearchRow>();
-  return responseJson({ results: (response.results ?? []).map(publicResult) });
-}
-
-function staticAsset(pathname: string) {
-  const key = pathname === '/' ? 'index.html' : pathname.slice(1);
-  const asset = STATIC_ASSETS[key];
-  if (!asset) return null;
-  const bytes = fromBase64(asset.body);
-  return new Response(bytes, { headers: { 'content-type': asset.type, 'cache-control': asset.immutable ? 'public, max-age=31536000, immutable' : 'no-cache', 'x-content-type-options': 'nosniff' } });
-}
-
-export default {
-  async fetch(request: Request, env: Env): Promise<Response> {
-    const url = new URL(request.url);
-    const securityHeaders = {
-      'strict-transport-security': 'max-age=31536000; includeSubDomains; preload',
-      'referrer-policy': 'strict-origin-when-cross-origin',
-      'x-content-type-options': 'nosniff',
-      'permissions-policy': 'camera=(), microphone=(), geolocation=()'
-    };
-    if (url.pathname === '/api/health') return responseJson({ ok: true, service: 'vipdid' }, 200, securityHeaders);
-    if (url.pathname === '/api/lock/status' && request.method === 'GET') return responseJson({ locked: await locked(request, env) }, 200, securityHeaders);
-    if (url.pathname === '/api/lock/unlock' && request.method === 'POST') return unlock(request, env);
-    if (url.pathname === '/api/public/search' && request.method === 'GET') return publicSearch(request, env);
-    const asset = staticAsset(url.pathname) ?? (request.method === 'GET' && ['/', '/features', '/privacy', '/terms'].includes(url.pathname) ? staticAsset('/') : null);
-    if (asset) {
-      Object.entries(securityHeaders).forEach(([key, value]) => asset.headers.set(key, value));
-      return asset;
-    }
-    return new Response('Not Found', { status: 404, headers: securityHeaders });
-  }
+const emailCopy = {
+  ar: { subject: 'رمز التحقق من الهوية الرقمية لكبار الشخصيات', intro: 'رمز التحقق الخاص بك هو', expiry: 'ينتهي الرمز خلال عشر دقائق. لا تشاركه مع أي شخص.', text: 'رمز التحقق من الهوية الرقمية لكبار الشخصيات' },
+  en: { subject: 'Your VIP Digital ID verification code', intro: 'Your verification code is', expiry: 'This code expires in ten minutes. Do not share it with anyone.', text: 'VIP Digital ID verification code' }
 };
+async function sendCode(env: Env, email: string, code: string, locale: Locale) { const copy = emailCopy[locale]; const text = `${copy.text}\n\n${copy.intro}: ${code}\n\n${copy.expiry}`; const html = `<div dir="${locale === 'ar' ? 'rtl' : 'ltr'}" lang="${locale}"><p>${copy.intro}</p><p style="font-size:28px;font-weight:700;letter-spacing:5px">${code}</p><p>${copy.expiry}</p></div>`; const response = await env.MAILER.fetch(new Request('https://mailer/v1/support/send', { method: 'POST', headers: { 'content-type': 'application/json', 'idempotency-key': `vipdid-code-${await hashed(`${email}:${code}`)}` }, body: JSON.stringify({ to: email, subject: copy.subject, text, html }) })); return response.ok; }
+async function verifyTurnstile(request: Request, env: Env, token: unknown) { if (typeof token !== 'string' || !token || !env.TURNSTILE_SECRET_KEY) return false; const form = new URLSearchParams({ secret: env.TURNSTILE_SECRET_KEY, response: token }); const ip = request.headers.get('CF-Connecting-IP'); if (ip) form.set('remoteip', ip); const response = await fetch('https://challenges.cloudflare.com/turnstile/v0/siteverify', { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: form }); const result = await response.json().catch(() => ({ success: false })) as { success?: boolean; hostname?: string }; return response.ok && result.success === true && result.hostname === 'vipdid.app'; }
+async function createChallenge(env: Env, request: Request, email: string, userId: string | null, purpose: 'registration' | 'login' | 'owner_setup', locale: Locale) { const now = Date.now(); const code = randomCode(); const salt = toBase64(crypto.getRandomValues(new Uint8Array(16))); const codeHash = toBase64(await deriveSecretHash(code, salt)); const ip = request.headers.get('CF-Connecting-IP') ?? 'unknown'; const ipHash = toBase64(await digest(ip)); await env.DB.batch([
+  env.DB.prepare('UPDATE auth_challenges SET consumed_at = ? WHERE email = ? AND purpose = ? AND consumed_at IS NULL').bind(now, email, purpose),
+  env.DB.prepare('INSERT INTO auth_challenges (id, user_id, email, purpose, code_hash, code_salt, locale, attempts, max_attempts, expires_at, consumed_at, requested_ip_hash, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, 0, 6, ?, NULL, ?, ?)').bind(crypto.randomUUID(), userId, email, purpose, codeHash, salt, locale, now + CHALLENGE_MS, ipHash, now)
+ ]); return code; }
+async function consumeChallenge(env: Env, email: string, code: string, purpose: 'registration' | 'login' | 'owner_setup') { const now = Date.now(); const challenge = await env.DB.prepare('SELECT id, user_id, code_hash, code_salt, expires_at, attempts, max_attempts FROM auth_challenges WHERE email = ? AND purpose = ? AND consumed_at IS NULL ORDER BY created_at DESC LIMIT 1').bind(email, purpose).first<ChallengeRow>(); if (!challenge || challenge.expires_at <= now) return { ok: false as const, error: 'challenge_expired' }; if (challenge.attempts >= challenge.max_attempts) return { ok: false as const, error: 'challenge_limited' }; const actual = await deriveSecretHash(code, challenge.code_salt); if (!equal(actual, fromBase64(challenge.code_hash))) { await env.DB.prepare('UPDATE auth_challenges SET attempts = attempts + 1 WHERE id = ?').bind(challenge.id).run(); return { ok: false as const, error: 'invalid_code' }; } return { ok: true as const, challenge }; }
+async function activeDevice(request: Request, env: Env, userId: string) { const token = cookie(request, 'vipdid_device'); if (!token) return null; const device = await env.DB.prepare('SELECT id FROM trusted_devices WHERE user_id = ? AND token_hash = ? AND expires_at > ? AND revoked_at IS NULL').bind(userId, await hashed(token), Date.now()).first<{ id: string }>(); if (device) await env.DB.prepare('UPDATE trusted_devices SET last_used_at = ? WHERE id = ?').bind(Date.now(), device.id).run(); return device; }
+async function issueSession(env: Env, user: UserRow, trustDevice: boolean) { const now = Date.now(); const sessionToken = randomToken(); const sessionId = crypto.randomUUID(); const cookies = [sessionCookie(sessionToken)]; let deviceId: string | null = null; if (trustDevice) { const deviceToken = randomToken(); deviceId = crypto.randomUUID(); await env.DB.prepare('INSERT INTO trusted_devices (id, user_id, token_hash, last_used_at, expires_at, revoked_at, created_at) VALUES (?, ?, ?, ?, ?, NULL, ?)').bind(deviceId, user.id, await hashed(deviceToken), now, now + DEVICE_SECONDS * 1000, now).run(); cookies.push(deviceCookie(deviceToken)); }
+ await env.DB.prepare('INSERT INTO auth_sessions (id, user_id, token_hash, trusted_device_id, expires_at, last_seen_at, revoked_at, created_at) VALUES (?, ?, ?, ?, ?, ?, NULL, ?)').bind(sessionId, user.id, await hashed(sessionToken), deviceId, now + SESSION_SECONDS * 1000, now, now).run(); await env.DB.prepare('UPDATE users SET last_login_at = ?, failed_login_attempts = 0, locked_until = NULL WHERE id = ?').bind(now, user.id).run(); return { user: userView(user), cookies }; }
+async function authUser(request: Request, env: Env) { const token = cookie(request, 'vipdid_session'); if (!token) return null; const user = await env.DB.prepare(`SELECT u.id, u.permanent_id, u.name, u.role, u.wallet_balance, u.email_verified_at, u.status, u.pin_hash, u.pin_salt, u.failed_login_attempts, u.locked_until FROM auth_sessions s JOIN users u ON u.id = s.user_id WHERE s.token_hash = ? AND s.expires_at > ? AND s.revoked_at IS NULL AND u.status = 'active'`).bind(await hashed(token), Date.now()).first<UserRow>(); if (user) await env.DB.prepare('UPDATE auth_sessions SET last_seen_at = ? WHERE token_hash = ?').bind(Date.now(), await hashed(token)).run(); return user; }
+
+async function register(request: Request, env: Env) { if (!sameOrigin(request)) return responseJson({ ok: false, error: 'invalid_request' }, 403); const body = await request.json().catch(() => ({})); const input = record(body); const locale = localeOf(input.locale); const email = emailOf(input.email); const name = typeof input.name === 'string' ? input.name.trim().slice(0, 120) : ''; const phone = phoneOf(input.phone); const whatsapp = phoneOf(input.whatsapp); if (!email || !name || phone === null || whatsapp === null || input.termsAccepted !== true || input.privacyAccepted !== true || input.eligibilityAccepted !== true) return responseJson({ ok: false, error: 'invalid_input' }, 400); if (await limited(env, request, 'register', email, 4, 900)) return responseJson({ ok: false, error: 'limited' }, 429); if (!(await verifyTurnstile(request, env, input.turnstileToken))) return responseJson({ ok: false, error: 'human_failed' }, 400); const now = Date.now(); let user = await env.DB.prepare('SELECT id, status FROM users WHERE email = ?').bind(email).first<{ id: string; status: string }>(); if (user?.status === 'active') return responseJson({ ok: false, error: 'email_in_use' }, 409); if (!user) { const id = `user_${crypto.randomUUID()}`; await env.DB.prepare('INSERT INTO users (id, permanent_id, tenant_id, name, email, phone, whatsapp, pin_hash, pin_salt, role, is_managed, wallet_balance, status, failed_login_attempts, terms_accepted_at, privacy_accepted_at, eligibility_acknowledged_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, 0, 0, ?, 0, ?, ?, ?, ?)').bind(id, `pending_${crypto.randomUUID()}`, 'tenant_main', name, email, phone || null, whatsapp || null, 'user', 'pending_verification', now, now, now, now).run(); user = { id, status: 'pending_verification' }; } else { await env.DB.prepare('UPDATE users SET name = ?, phone = ?, whatsapp = ?, terms_accepted_at = ?, privacy_accepted_at = ?, eligibility_acknowledged_at = ? WHERE id = ?').bind(name, phone || null, whatsapp || null, now, now, now, user.id).run(); }
+ const code = await createChallenge(env, request, email, user.id, 'registration', locale); if (!(await sendCode(env, email, code, locale))) return responseJson({ ok: false, error: 'delivery_failed' }, 503); await env.DB.prepare('INSERT INTO audit_logs (id, tenant_id, actor_id, action, target_type, target_id, details_json, ip_hash, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)').bind(crypto.randomUUID(), 'tenant_main', user.id, 'registration_code_sent', 'user', user.id, JSON.stringify({ locale }), toBase64(await digest(request.headers.get('CF-Connecting-IP') ?? 'unknown')), now).run(); return responseJson({ ok: true, state: 'verification_required' }, 202); }
+
+async function verifyRegistration(request: Request, env: Env) { if (!sameOrigin(request)) return responseJson({ ok: false, error: 'invalid_request' }, 403); const input = record(await request.json().catch(() => ({}))); const email = emailOf(input.email); const code = pinOf(input.code); const pin = pinOf(input.pin); if (!email || !code || !pin) return responseJson({ ok: false, error: 'invalid_input' }, 400); const checked = await consumeChallenge(env, email, code, 'registration'); if (!checked.ok) return responseJson({ ok: false, error: checked.error }, 401); const user = await env.DB.prepare(`SELECT id, permanent_id, name, role, wallet_balance, email_verified_at, status, pin_hash, pin_salt, failed_login_attempts, locked_until FROM users WHERE id = ? AND email = ? AND status = 'pending_verification'`).bind(checked.challenge.user_id, email).first<UserRow>(); if (!user) return responseJson({ ok: false, error: 'invalid_request' }, 400); const sequence = Math.max(1, Number(await setting(env, 'next_permanent_id_seq') ?? '1')); const permanentId = `C${sequence + 1}`; const salt = toBase64(crypto.getRandomValues(new Uint8Array(16))); const pinHash = toBase64(await deriveSecretHash(pin, salt)); const now = Date.now(); await env.DB.batch([
+  env.DB.prepare('UPDATE auth_challenges SET consumed_at = ? WHERE id = ? AND consumed_at IS NULL').bind(now, checked.challenge.id),
+  env.DB.prepare('UPDATE users SET permanent_id = ?, pin_hash = ?, pin_salt = ?, pin_set_at = ?, email_verified_at = ?, status = ?, wallet_balance = wallet_balance + 100 WHERE id = ?').bind(permanentId, pinHash, salt, now, now, 'active', user.id),
+  env.DB.prepare('UPDATE system_settings SET value = ?, updated_at = ? WHERE key = ?').bind(String(sequence + 1), now, 'next_permanent_id_seq'),
+  env.DB.prepare('INSERT INTO ledger_entries (id, idempotency_key, from_account, to_account, amount, tx_type, metadata_json, actor_id, created_at) VALUES (?, ?, ?, ?, 100, ?, ?, ?, ?)').bind(crypto.randomUUID(), `registration-bonus:${user.id}`, 'treasury', user.id, 'registration_verification_bonus', JSON.stringify({ permanentId }), user.id, now),
+  env.DB.prepare('INSERT INTO audit_logs (id, tenant_id, actor_id, action, target_type, target_id, details_json, ip_hash, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)').bind(crypto.randomUUID(), 'tenant_main', user.id, 'registration_verified', 'user', user.id, JSON.stringify({ permanentId }), toBase64(await digest(request.headers.get('CF-Connecting-IP') ?? 'unknown')), now)
+ ]);
+ const active = { ...user, permanent_id: permanentId, wallet_balance: user.wallet_balance + 100, email_verified_at: now, status: 'active', pin_hash: pinHash, pin_salt: salt }; const issued = await issueSession(env, active, input.trustDevice !== false); return withCookies(responseJson({ ok: true, user: issued.user }), issued.cookies); }
+
+async function loginStart(request: Request, env: Env) { if (!sameOrigin(request)) return responseJson({ ok: false, error: 'invalid_request' }, 403); const input = record(await request.json().catch(() => ({}))); const email = emailOf(input.email); const pin = pinOf(input.pin); const locale = localeOf(input.locale); if (!email || !pin) return responseJson({ ok: false, error: 'invalid_login' }, 400); if (await limited(env, request, 'login', email, 8, 900)) return responseJson({ ok: false, error: 'limited' }, 429); const user = await env.DB.prepare(`SELECT id, permanent_id, name, role, wallet_balance, email_verified_at, status, pin_hash, pin_salt, failed_login_attempts, locked_until FROM users WHERE email = ?`).bind(email).first<UserRow>(); const now = Date.now(); if (!user || user.status !== 'active') return responseJson({ ok: false, error: 'invalid_login' }, 401); if (user.locked_until && user.locked_until > now) return responseJson({ ok: false, error: 'account_locked' }, 429); if (!user.pin_hash || !user.pin_salt) return responseJson({ ok: false, error: 'pin_not_set' }, 401); if (!equal(await deriveSecretHash(pin, user.pin_salt), fromBase64(user.pin_hash))) { const attempts = user.failed_login_attempts + 1; const lockedUntil = attempts >= 5 ? now + 15 * 60 * 1000 : null; await env.DB.prepare('UPDATE users SET failed_login_attempts = ?, locked_until = ? WHERE id = ?').bind(attempts, lockedUntil, user.id).run(); return responseJson({ ok: false, error: lockedUntil ? 'account_locked' : 'invalid_login' }, 401); }
+ await clearLimit(env, request, 'login', email); const device = await activeDevice(request, env, user.id); if (device) { const issued = await issueSession(env, user, false); return withCookies(responseJson({ ok: true, state: 'authenticated', user: issued.user }), issued.cookies); }
+ const code = await createChallenge(env, request, email, user.id, 'login', locale); if (!(await sendCode(env, email, code, locale))) return responseJson({ ok: false, error: 'delivery_failed' }, 503); return responseJson({ ok: true, state: 'verification_required' }, 202); }
+
+async function verifyLogin(request: Request, env: Env) { if (!sameOrigin(request)) return responseJson({ ok: false, error: 'invalid_request' }, 403); const input = record(await request.json().catch(() => ({}))); const email = emailOf(input.email); const code = pinOf(input.code); if (!email || !code) return responseJson({ ok: false, error: 'invalid_input' }, 400); const checked = await consumeChallenge(env, email, code, 'login'); if (!checked.ok) return responseJson({ ok: false, error: checked.error }, 401); const user = await env.DB.prepare(`SELECT id, permanent_id, name, role, wallet_balance, email_verified_at, status, pin_hash, pin_salt, failed_login_attempts, locked_until FROM users WHERE id = ? AND email = ? AND status = 'active'`).bind(checked.challenge.user_id, email).first<UserRow>(); if (!user) return responseJson({ ok: false, error: 'invalid_login' }, 401); await env.DB.prepare('UPDATE auth_challenges SET consumed_at = ? WHERE id = ?').bind(Date.now(), checked.challenge.id).run(); const issued = await issueSession(env, user, input.trustDevice !== false); return withCookies(responseJson({ ok: true, state: 'authenticated', user: issued.user }), issued.cookies); }
+
+async function ownerStart(request: Request, env: Env) { if (!sameOrigin(request)) return responseJson({ ok: false, error: 'invalid_request' }, 403); const input = record(await request.json().catch(() => ({}))); const email = emailOf(input.email); const locale = localeOf(input.locale); if (!email || email !== OWNER_EMAIL || !(await verifyTurnstile(request, env, input.turnstileToken))) return responseJson({ ok: false, error: 'invalid_login' }, 401); if (await limited(env, request, 'owner', email, 3, 900)) return responseJson({ ok: false, error: 'limited' }, 429); const user = await env.DB.prepare(`SELECT id FROM users WHERE email = ? AND role = 'super_admin'`).bind(email).first<{ id: string }>(); if (!user) return responseJson({ ok: false, error: 'invalid_login' }, 401); const code = await createChallenge(env, request, email, user.id, 'owner_setup', locale); if (!(await sendCode(env, email, code, locale))) return responseJson({ ok: false, error: 'delivery_failed' }, 503); return responseJson({ ok: true, state: 'verification_required' }, 202); }
+
+async function ownerVerify(request: Request, env: Env) { if (!sameOrigin(request)) return responseJson({ ok: false, error: 'invalid_request' }, 403); const input = record(await request.json().catch(() => ({}))); const email = emailOf(input.email); const code = pinOf(input.code); const pin = pinOf(input.pin); if (!email || email !== OWNER_EMAIL || !code || !pin) return responseJson({ ok: false, error: 'invalid_input' }, 400); const checked = await consumeChallenge(env, email, code, 'owner_setup'); if (!checked.ok) return responseJson({ ok: false, error: checked.error }, 401); const user = await env.DB.prepare(`SELECT id, permanent_id, name, role, wallet_balance, email_verified_at, status, pin_hash, pin_salt, failed_login_attempts, locked_until FROM users WHERE id = ? AND email = ? AND role = 'super_admin'`).bind(checked.challenge.user_id, email).first<UserRow>(); if (!user) return responseJson({ ok: false, error: 'invalid_login' }, 401); const now = Date.now(); const salt = toBase64(crypto.getRandomValues(new Uint8Array(16))); const pinHash = toBase64(await deriveSecretHash(pin, salt)); await env.DB.batch([env.DB.prepare('UPDATE auth_challenges SET consumed_at = ? WHERE id = ?').bind(now, checked.challenge.id), env.DB.prepare('UPDATE users SET pin_hash = ?, pin_salt = ?, pin_set_at = ?, email_verified_at = ?, status = ? WHERE id = ?').bind(pinHash, salt, now, now, 'active', user.id)]); const issued = await issueSession(env, { ...user, pin_hash: pinHash, pin_salt: salt, email_verified_at: now, status: 'active' }, input.trustDevice !== false); return withCookies(responseJson({ ok: true, state: 'authenticated', user: issued.user }), issued.cookies); }
+
+async function me(request: Request, env: Env) { const user = await authUser(request, env); return responseJson({ ok: true, authenticated: Boolean(user), user: user ? userView(user) : null }); }
+async function logout(request: Request, env: Env) { if (!sameOrigin(request)) return responseJson({ ok: false, error: 'invalid_request' }, 403); const token = cookie(request, 'vipdid_session'); if (token) await env.DB.prepare('UPDATE auth_sessions SET revoked_at = ? WHERE token_hash = ? AND revoked_at IS NULL').bind(Date.now(), await hashed(token)).run(); return withCookies(responseJson({ ok: true }), [clearCookie('vipdid_session'), clearCookie('vipdid_device')]); }
+async function unlock(request: Request, env: Env) { const ip = request.headers.get('CF-Connecting-IP') ?? 'unknown'; const rateKey = `lock:${toBase64Url(await digest(ip)).slice(0, 24)}`; const current = Number(await env.RATE_LIMIT.get(rateKey) ?? '0'); if (current >= 5) return responseJson({ ok: false, reason: 'limited' }, 429); const body = await request.json<{ password?: string }>().catch(() => ({} as { password?: string })); const [enabled, expectedHash, salt] = await Promise.all([setting(env, 'site_lock_enabled'), setting(env, 'site_lock_password_hash'), setting(env, 'site_lock_password_salt')]); if (enabled !== '1') return responseJson({ ok: true, locked: false }); const verified = Boolean(body.password && expectedHash && salt && equal(await deriveSecretHash(body.password, salt), fromBase64(expectedHash))); if (!verified) { await env.RATE_LIMIT.put(rateKey, String(current + 1), { expirationTtl: 900 }); return responseJson({ ok: false, reason: 'invalid' }, 401); } await env.RATE_LIMIT.delete(rateKey); const payload = toBase64Url(encoder.encode(JSON.stringify({ expiresAt: Date.now() + 43200000 }))); const token = `${payload}.${await sign(payload, env.SESSION_SIGNING_KEY)}`; return responseJson({ ok: true, locked: false }, 200, { 'set-cookie': `vipdid_access=${token}; Path=/; Max-Age=43200; HttpOnly; Secure; SameSite=None` }); }
+function staticAsset(pathname: string) { const key = pathname === '/' ? 'index.html' : pathname.slice(1); const asset = STATIC_ASSETS[key]; if (!asset) return null; return new Response(fromBase64(asset.body), { headers: { 'content-type': asset.type, 'cache-control': asset.immutable ? 'public, max-age=31536000, immutable' : 'no-cache', 'x-content-type-options': 'nosniff' } }); }
+
+export default { async fetch(request: Request, env: Env): Promise<Response> { const url = new URL(request.url); if (url.pathname === '/api/health') return responseJson({ ok: true, service: 'vipdid' }); if (url.pathname === '/api/lock/status' && request.method === 'GET') return responseJson({ locked: await locked(request, env) }); if (url.pathname === '/api/lock/unlock' && request.method === 'POST') return unlock(request, env); if (url.pathname === '/api/public/search' && request.method === 'GET') return publicSearch(request, env); if (url.pathname === '/api/auth/me' && request.method === 'GET') return me(request, env); if (url.pathname === '/api/auth/register' && request.method === 'POST') return register(request, env); if (url.pathname === '/api/auth/register/verify' && request.method === 'POST') return verifyRegistration(request, env); if (url.pathname === '/api/auth/login/start' && request.method === 'POST') return loginStart(request, env); if (url.pathname === '/api/auth/login/verify' && request.method === 'POST') return verifyLogin(request, env); if (url.pathname === '/api/auth/owner/start' && request.method === 'POST') return ownerStart(request, env); if (url.pathname === '/api/auth/owner/verify' && request.method === 'POST') return ownerVerify(request, env); if (url.pathname === '/api/auth/logout' && request.method === 'POST') return logout(request, env); const asset = staticAsset(url.pathname) ?? (request.method === 'GET' && ['/', '/features', '/privacy', '/terms'].includes(url.pathname) ? staticAsset('/') : null); if (asset) return secure(asset); return new Response('Not Found', { status: 404, headers: securityHeaders }); } };

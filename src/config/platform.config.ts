@@ -14,6 +14,9 @@ export const platformConfig = {
     supportEmail: 'vip.did.app@gmail.com',
     whatsapp: '966555444959'
   },
+  verification: {
+    turnstileSiteKey: import.meta.env.VITE_TURNSTILE_SITE_KEY ?? '0x4AAAAAAFwJhk7pp9aeFV4Y'
+  },
   assets: {
     logo: '/brand/logo.webp',
     coverDark: '/brand/cover.webp',

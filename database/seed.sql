@@ -1,7 +1,7 @@
 INSERT OR REPLACE INTO system_settings (key, value, updated_at) VALUES
   ('site_lock_enabled', '1', (unixepoch() * 1000)),
-  ('site_lock_password_hash', 'xuEDty2DBjncYYwD5UyL7i3SlkLclxfdMN60rjWnaFk=', (unixepoch() * 1000)),
-  ('site_lock_password_salt', 'e+I0gFOEaAQ4cAK+MfVFSw==', (unixepoch() * 1000)),
+  ('site_lock_password_hash', 'PxzgSR9ROGGLzDR3+islVRYAd4Iq14tRNXcWe+4Y+f4=', (unixepoch() * 1000)),
+  ('site_lock_password_salt', 'lFhAE3C2YPVTsredrecEkw==', (unixepoch() * 1000)),
   ('treasury_balance', '1000000000000', (unixepoch() * 1000)),
   ('next_permanent_id_seq', '1', (unixepoch() * 1000));
 
@@ -16,11 +16,11 @@ INSERT OR IGNORE INTO tenants (
 );
 
 INSERT OR IGNORE INTO users (
-  id, permanent_id, tenant_id, name, email, phone, whatsapp, pin_hash, role, is_managed,
-  managed_by_user_id, custody_transfer_email, custody_token_hash, custody_token_expires,
+  id, permanent_id, tenant_id, name, email, phone, whatsapp, pin_hash, pin_salt, email_verified_at, pin_set_at, last_login_at,
+  role, is_managed, managed_by_user_id, custody_transfer_email, custody_token_hash, custody_token_expires,
   referred_by_permanent_id, wallet_balance, status, failed_login_attempts, locked_until,
-  terms_accepted_at, created_at
+  terms_accepted_at, privacy_accepted_at, eligibility_acknowledged_at, created_at
 ) VALUES (
-  'user_c1', 'C1', 'tenant_main', 'مالك المنصة', 'rijalalwatan.com@gmail.com', NULL, '966555444959', NULL,
-  'super_admin', 0, NULL, NULL, NULL, NULL, NULL, 0, 'active', 0, NULL, (unixepoch() * 1000), (unixepoch() * 1000)
+  'user_c1', 'C1', 'tenant_main', 'مالك المنصة', 'rijalalwatan.com@gmail.com', NULL, '966555444959', NULL, NULL, (unixepoch() * 1000), NULL, NULL,
+  'super_admin', 0, NULL, NULL, NULL, NULL, NULL, 0, 'active', 0, NULL, (unixepoch() * 1000), (unixepoch() * 1000), (unixepoch() * 1000), (unixepoch() * 1000)
 );
