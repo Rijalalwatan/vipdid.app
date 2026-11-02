@@ -70,6 +70,8 @@ export const walletContent = {
     sendDirectGrant: 'صرف المنحة',
     directGrantSuccess: 'تم صرف المنحة من الخزينة وتوثيقها.',
     directGrantFailed: 'تعذر صرف المنحة. تحقق من المعرف والرصيد والملاحظة.',
+    stepUpPin: 'أعد إدخال رمز الدخول الشخصي',
+    stepUpLead: 'تأكيد الرمز مطلوب قبل اعتماد طلب منحة أو صرف منحة مباشرة.',
     requestAt: 'وقت الطلب',
     transactionTypes: {
       registration_verification_bonus: 'مكافأة التسجيل والتحقق',
@@ -156,6 +158,8 @@ export const walletContent = {
     sendDirectGrant: 'Issue grant',
     directGrantSuccess: 'The treasury grant was issued and recorded.',
     directGrantFailed: 'The grant could not be issued. Check the ID, balance, and note.',
+    stepUpPin: 'Re-enter your personal PIN',
+    stepUpLead: 'PIN confirmation is required before approving a grant request or issuing a direct grant.',
     requestAt: 'Requested at',
     transactionTypes: {
       registration_verification_bonus: 'Registration and verification reward',

@@ -11,7 +11,7 @@ type Copy = {
   partnerTitle: string; partnerLead: string; usersTitle: string; reviewsTitle: string; settingsTitle: string;
   requestPartner: string; requestPartnerLead: string; submitRequest: string; requested: string;
   custodyTitle: string; custodyLead: string; custodyPin: string; confirmCustody: string; custodyAccepted: string; custodyInvalid: string;
-  loading: string; save: string; cancel: string; error: string; success: string;
+  loading: string; save: string; cancel: string; error: string; success: string; stepUpPin: string; stepUpLead: string;
 };
 
 export const sovereigntyContent: Record<SovereigntyLocale, Copy> = {
@@ -27,7 +27,7 @@ export const sovereigntyContent: Record<SovereigntyLocale, Copy> = {
     partnerTitle: 'لوحة العضيد', partnerLead: 'إدارة مستقلة لنطاقك ضمن السيادة المركزية للمنصة.', usersTitle: 'مستخدمو النطاق', reviewsTitle: 'طلبات النشر', settingsTitle: 'هوية النطاق',
     requestPartner: 'طلب عضيد', requestPartnerLead: 'اطلب نطاقك الفرعي ليخضع لاعتماد المالك الرئيسي.', submitRequest: 'إرسال الطلب', requested: 'تم إرسال الطلب للاعتماد.',
     custodyTitle: 'استلام العهدة', custodyLead: 'أكد استلام الإدارة وحدد رمز دخول خاصاً بك.', custodyPin: 'رمز دخول من ستة أرقام', confirmCustody: 'تأكيد الاستلام', custodyAccepted: 'تم تسليم العهدة بنجاح.', custodyInvalid: 'رابط العهدة غير صالح أو منتهٍ.',
-    loading: 'جارٍ التحميل', save: 'حفظ', cancel: 'إلغاء', error: 'تعذر إتمام العملية. راجع البيانات وحاول مرة أخرى.', success: 'تمت العملية بنجاح.'
+    loading: 'جارٍ التحميل', save: 'حفظ', cancel: 'إلغاء', error: 'تعذر إتمام العملية. راجع البيانات وحاول مرة أخرى.', success: 'تمت العملية بنجاح.', stepUpPin: 'أعد إدخال رمز الدخول الشخصي', stepUpLead: 'تتطلب العمليات السيادية الحساسة تأكيد رمز الدخول قبل تنفيذها.'
   },
   en: {
     sovereignTitle: 'Sovereign Console', sovereignLead: 'Manage the Digital ID asset, partners, and custody under central controls.',
@@ -41,6 +41,6 @@ export const sovereigntyContent: Record<SovereigntyLocale, Copy> = {
     partnerTitle: 'Partner console', partnerLead: 'A separate workspace for your subdomain under the platform’s central sovereignty.', usersTitle: 'Subdomain users', reviewsTitle: 'Publication requests', settingsTitle: 'Subdomain identity',
     requestPartner: 'Request a partner', requestPartnerLead: 'Request your subdomain for primary owner approval.', submitRequest: 'Send request', requested: 'Your request was submitted for approval.',
     custodyTitle: 'Accept custody', custodyLead: 'Confirm management transfer and choose your personal PIN.', custodyPin: 'Six-digit PIN', confirmCustody: 'Accept transfer', custodyAccepted: 'Custody was transferred successfully.', custodyInvalid: 'This custody link is invalid or expired.',
-    loading: 'Loading', save: 'Save', cancel: 'Cancel', error: 'The operation could not be completed. Review the information and try again.', success: 'The operation was completed successfully.'
+    loading: 'Loading', save: 'Save', cancel: 'Cancel', error: 'The operation could not be completed. Review the information and try again.', success: 'The operation was completed successfully.', stepUpPin: 'Re-enter your personal PIN', stepUpLead: 'Sensitive sovereign actions require PIN confirmation before they are performed.'
   }
 };

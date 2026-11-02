@@ -13,6 +13,7 @@ CREATE TABLE IF NOT EXISTS tenants (
   name_en TEXT NOT NULL,
   logo_url TEXT,
   cover_url TEXT,
+  custom_domain TEXT UNIQUE COLLATE NOCASE,
   description_ar TEXT,
   description_en TEXT,
   theme_config_json TEXT NOT NULL DEFAULT '{}',
@@ -217,6 +218,7 @@ CREATE INDEX IF NOT EXISTS idx_users_tenant_status ON users(tenant_id, status);
 CREATE INDEX IF NOT EXISTS idx_users_referrer ON users(referred_by_permanent_id, status);
 CREATE INDEX IF NOT EXISTS idx_profiles_tenant_slug ON profiles(tenant_id, slug);
 CREATE INDEX IF NOT EXISTS idx_tenants_type_status ON tenants(tenant_type, status, created_at);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_tenants_custom_domain ON tenants(custom_domain COLLATE NOCASE) WHERE custom_domain IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_custody_invitations_subject ON custody_invitations(subject_type, subject_user_id, status, expires_at);
 CREATE INDEX IF NOT EXISTS idx_custody_invitations_email ON custody_invitations(recipient_email, status, expires_at);
 CREATE INDEX IF NOT EXISTS idx_ledger_entries_actor_created ON ledger_entries(actor_id, created_at DESC);
