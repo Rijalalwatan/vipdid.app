@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { platformConfig } from '../config/platform.config';
 import { LanguageToggle } from './LanguageToggle';
+import { VipCircuitRays } from './VipCircuitRays';
 import { VipMatrix } from './VipMatrix';
 
 type Locale = 'ar' | 'en';
@@ -42,6 +43,7 @@ type PlatformMastheadProps = {
 export function PlatformMasthead({ eyebrow, title, description, compact = false }: PlatformMastheadProps) {
   return (
     <section className={`platform-masthead${compact ? ' masthead-compact' : ''}`} aria-labelledby="platform-masthead-title">
+      <VipCircuitRays />
       <VipMatrix className="masthead-matrix" />
       <div className="masthead-content">
         <div className="masthead-emblem" aria-hidden="true">
