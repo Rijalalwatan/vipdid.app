@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import QRCode from 'qrcode';
+import { createGreenQr, downloadDataUrl, makeVcard, shareDataUrl } from '../lib/qr';
 import { publicUrl, type ProfileData, type ProfileMedia, type PublicSection } from '../lib/profile';
 import type { ProfileCopy, ProfileLocale } from '../i18n/profile-content';
 import { ProfileCover, ScrollPills } from './SiteChrome';
@@ -10,8 +10,6 @@ type Props = { locale: ProfileLocale; text: ProfileCopy; slug: string; onNavigat
 function entries(value: string) { return value.split('\n').map((line) => line.trim()).filter(Boolean); }
 function validUrl(value: string) { try { const url = new URL(value); return url.protocol === 'https:' || url.protocol === 'http:' ? url.toString() : null; } catch { return null; } }
 function namedLinks(value: string) { return entries(value).map((line) => { const [label, ...rest] = line.split('|'); const url = validUrl(rest.join('|').trim()); return label.trim() && url ? { label: label.trim().slice(0, 100), url } : null; }).filter((value): value is { label: string; url: string } => Boolean(value)); }
-function escapeVcard(value: string) { return value.replace(/[\\;,\n\r]/g, (character) => ({ '\\': '\\\\', ';': '\\;', ',': '\\,', '\n': '\\n', '\r': '' })[character] ?? ''); }
-
 export function PublicProfilePage({ locale, text, slug, onNavigate }: Props) {
   const [profile, setProfile] = useState<PublicProfile | null>(null);
   const [state, setState] = useState<'loading' | 'ready' | 'missing'>('loading');
@@ -27,22 +25,14 @@ export function PublicProfilePage({ locale, text, slug, onNavigate }: Props) {
     }).catch(() => setState('missing'));
   }, [slug]);
 
-  const vcard = useMemo(() => {
-    if (!profile) return '';
-    const lines = ['BEGIN:VCARD', 'VERSION:3.0', `FN:${escapeVcard(profile.data.displayName)}`, profile.data.title ? `TITLE:${escapeVcard(profile.data.title)}` : ''];
-    if (profile.data.showPhone && profile.contact.phone) lines.push(`TEL;TYPE=CELL:${escapeVcard(profile.contact.phone)}`);
-    if (profile.data.showWhatsapp && profile.contact.whatsapp) lines.push(`TEL;TYPE=HOME:${escapeVcard(profile.contact.whatsapp)}`);
-    if (profile.data.showEmail && profile.contact.email) lines.push(`EMAIL:${escapeVcard(profile.contact.email)}`);
-    lines.push(`URL:${publicUrl(profile.slug)}`, 'END:VCARD');
-    return lines.filter(Boolean).join('\r\n');
-  }, [profile]);
+  const vcard = useMemo(() => profile ? makeVcard(profile.data, profile.contact, publicUrl(profile.slug)) : '', [profile]);
 
   useEffect(() => {
     if (!profile) return;
     const create = async () => {
       const [site, contact] = await Promise.all([
-        QRCode.toDataURL(publicUrl(profile.slug), { width: 260, margin: 1, errorCorrectionLevel: 'M', color: { dark: '#171208', light: '#fffaf0' } }),
-        QRCode.toDataURL(vcard || publicUrl(profile.slug), { width: 260, margin: 1, errorCorrectionLevel: 'M', color: { dark: '#171208', light: '#fffaf0' } })
+        createGreenQr(publicUrl(profile.slug), undefined, 360),
+        createGreenQr(vcard || publicUrl(profile.slug), undefined, 360)
       ]);
       setSiteCode(site); setContactCode(contact);
     };
@@ -71,7 +61,7 @@ export function PublicProfilePage({ locale, text, slug, onNavigate }: Props) {
     <section className="public-section" id="skills" tabIndex={-1} aria-labelledby="skills-title"><h2 id="skills-title">{text.tabSkills}</h2>{entries(profile.data.skills).length ? <div className="skill-cloud">{entries(profile.data.skills).map((skill) => <span key={skill}>{skill}</span>)}</div> : <p className="empty-section">{text.emptySection}</p>}{media('skill').length ? <div className="public-media-grid">{media('skill').map((asset) => <img key={asset.id} src={asset.url} alt={text.imageAlt} />)}</div> : null}</section>
     <section className="public-section" id="portfolio" tabIndex={-1} aria-labelledby="portfolio-title"><h2 id="portfolio-title">{text.tabPortfolio}</h2>{entries(profile.data.portfolio).length ? <div className="line-list">{entries(profile.data.portfolio).map((item, index) => <p key={`portfolio-${index}`}>{item}</p>)}</div> : <p className="empty-section">{text.emptySection}</p>}{media('portfolio').length ? <div className="public-media-grid portfolio-grid">{media('portfolio').map((asset) => <img key={asset.id} src={asset.url} alt={text.imageAlt} />)}</div> : null}{profile.data.services ? <div className="subsection"><h3>{text.services}</h3>{entries(profile.data.services).map((item) => <p key={item}>{item}</p>)}</div> : null}</section>
     <section className="public-section" id="contact" tabIndex={-1} aria-labelledby="contact-title"><h2 id="contact-title">{text.contact}</h2>{profile.data.showWhatsapp && profile.contact.whatsapp ? <a className="gold-button" href={`https://wa.me/${profile.contact.whatsapp.replace(/[^0-9]/g, '')}`}>{text.whatsapp}</a> : null}{profile.data.showPhone && profile.contact.phone ? <a className="outline-button" href={`tel:${profile.contact.phone}`}>{text.phone}</a> : null}{profile.data.showEmail && profile.contact.email ? <a className="outline-button" href={`mailto:${profile.contact.email}`}>{text.email}</a> : null}{!profile.data.showWhatsapp && !profile.data.showPhone && !profile.data.showEmail ? <p className="empty-section">{text.noContact}</p> : null}{vcard ? <button className="text-button" type="button" onClick={downloadVcard}>{text.saveContact}</button> : null}{social.length ? <div className="link-cluster"><h3>{text.siteLinks}</h3>{social.map((link) => <a key={link.url} href={link.url} target="_blank" rel="noreferrer">{link.label}</a>)}</div> : null}{video ? <p><a className="outline-button" href={video} target="_blank" rel="noreferrer">{text.openVideo}</a></p> : null}{external.length ? <div className="link-cluster"><h3>{text.externalLinksTitle}</h3>{external.map((link) => <a key={link.url} href={link.url} target="_blank" rel="noreferrer">{link.label}</a>)}</div> : null}</section>
-    <section className="public-section codes-section" id="codes" tabIndex={-1} aria-labelledby="codes-title"><h2 id="codes-title">{text.tabCodes}</h2><p>{text.codesLead}</p><div className="qr-grid"><figure><img src={siteCode} alt={text.siteCode} /><figcaption>{text.siteCode}</figcaption></figure><figure><img src={contactCode} alt={text.contactCode} /><figcaption>{text.contactCode}</figcaption></figure></div></section>
+    <section className="public-section codes-section" id="codes" tabIndex={-1} aria-labelledby="codes-title"><h2 id="codes-title">{text.tabCodes}</h2><p>{text.codesLead}</p><div className="qr-grid"><figure><img src={siteCode} alt={text.siteCode} /><figcaption>{text.siteCode}</figcaption>{siteCode ? <div className="dashboard-actions"><button className="outline-button" type="button" onClick={() => downloadDataUrl(siteCode, `${profile.slug}-site-qr.png`)}>{text.downloadCode}</button><button className="outline-button" type="button" onClick={() => void shareDataUrl(siteCode, `${profile.slug}-site-qr.png`, text.siteCode)}>{text.shareCode}</button></div> : null}</figure><figure><img src={contactCode} alt={text.contactCode} /><figcaption>{text.contactCode}</figcaption>{contactCode ? <div className="dashboard-actions"><button className="outline-button" type="button" onClick={() => downloadDataUrl(contactCode, `${profile.slug}-contact-qr.png`)}>{text.downloadCode}</button><button className="outline-button" type="button" onClick={() => void shareDataUrl(contactCode, `${profile.slug}-contact-qr.png`, text.contactCode)}>{text.shareCode}</button></div> : null}</figure></div></section>
     <footer className="profile-footer"><p>{text.footerOwnership}</p><div><button type="button" onClick={() => onNavigate('/privacy')}>{text.privacy}</button><button type="button" onClick={() => onNavigate('/terms')}>{text.terms}</button><button type="button" onClick={() => onNavigate('/')}>{text.returnHome}</button></div></footer>
   </main>;
 }

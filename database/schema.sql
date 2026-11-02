@@ -87,6 +87,7 @@ CREATE TABLE IF NOT EXISTS publish_requests (
   status TEXT NOT NULL CHECK(status IN ('pending', 'approved', 'changes_requested', 'rejected')),
   reviewer_id TEXT REFERENCES users(id),
   review_note TEXT,
+  submission_locale TEXT NOT NULL DEFAULT 'ar' CHECK(submission_locale IN ('ar', 'en')),
   submitted_at INTEGER NOT NULL,
   reviewed_at INTEGER
 );
@@ -110,6 +111,18 @@ CREATE TABLE IF NOT EXISTS ledger_entries (
   tx_type TEXT NOT NULL,
   metadata_json TEXT,
   actor_id TEXT,
+  created_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS notifications (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL REFERENCES users(id),
+  request_id TEXT REFERENCES publish_requests(id),
+  kind TEXT NOT NULL CHECK(kind IN ('publication_approved', 'publication_changes_requested', 'publication_rejected')),
+  locale TEXT NOT NULL CHECK(locale IN ('ar', 'en')),
+  title TEXT NOT NULL,
+  message TEXT NOT NULL,
+  is_read INTEGER NOT NULL DEFAULT 0 CHECK(is_read IN (0, 1)),
   created_at INTEGER NOT NULL
 );
 
@@ -166,9 +179,11 @@ CREATE INDEX IF NOT EXISTS idx_users_tenant_status ON users(tenant_id, status);
 CREATE INDEX IF NOT EXISTS idx_profiles_tenant_slug ON profiles(tenant_id, slug);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_profiles_slug_global ON profiles(slug);
 CREATE INDEX IF NOT EXISTS idx_publish_requests_tenant_status ON publish_requests(tenant_id, status, submitted_at);
+CREATE INDEX IF NOT EXISTS idx_publish_requests_profile_status ON publish_requests(profile_id, status, submitted_at);
 CREATE INDEX IF NOT EXISTS idx_media_assets_profile ON media_assets(profile_id, category);
 CREATE INDEX IF NOT EXISTS idx_media_assets_user_category ON media_assets(user_id, category, created_at);
 CREATE INDEX IF NOT EXISTS idx_ledger_entries_created_at ON ledger_entries(created_at);
+CREATE INDEX IF NOT EXISTS idx_notifications_user_created ON notifications(user_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_audit_logs_tenant_created_at ON audit_logs(tenant_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_auth_challenges_email_purpose ON auth_challenges(email, purpose, expires_at);
 CREATE INDEX IF NOT EXISTS idx_trusted_devices_user_active ON trusted_devices(user_id, expires_at);

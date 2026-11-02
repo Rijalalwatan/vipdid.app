@@ -28,6 +28,11 @@ export type ProfileMedia = {
   url: string;
 };
 
+export type PublicationStatus = 'pending' | 'approved' | 'changes_requested' | 'rejected' | null;
+export type PublicationState = { isPublished: boolean; latestStatus: PublicationStatus; latestRequestId: string | null; submittedAt: number | null; reviewNote: string | null };
+export type PlatformNotification = { id: string; kind: 'publication_approved' | 'publication_changes_requested' | 'publication_rejected'; title: string; message: string; createdAt: number };
+export type ReviewRequest = { id: string; slug: string; ownerName: string; ownerEmail: string; submittedAt: number; status: PublicationStatus; reviewNote: string | null; snapshot: { data: ProfileData; mediaIds: string[] }; submissionLocale: 'ar' | 'en' };
+
 export type AccountProfile = {
   slug: string;
   data: ProfileData;
@@ -36,6 +41,7 @@ export type AccountProfile = {
   storageUsedBytes: number;
   exists: boolean;
   contact: { email: string; phone: string; whatsapp: string };
+  publication: PublicationState;
 };
 
 export const emptyProfile = (displayName = ''): ProfileData => ({

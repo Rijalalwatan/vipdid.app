@@ -14,9 +14,12 @@ type PublicResult = { slug: string; name: string; title: string; summary: string
 type UserRow = { id: string; permanent_id: string; name: string; role: 'user' | 'moderator' | 'adheed' | 'super_admin'; wallet_balance: number; email_verified_at: number | null; status: string; pin_hash: string | null; pin_salt: string | null; failed_login_attempts: number; locked_until: number | null };
 type ChallengeRow = { id: string; user_id: string | null; code_hash: string; code_salt: string; expires_at: number; attempts: number; max_attempts: number };
 type MediaCategory = 'avatar' | 'cover' | 'skill' | 'portfolio';
-type ProfileRow = { id: string; user_id: string; tenant_id: string; slug: string; draft_json: string; is_published: number; storage_used_bytes: number; images_count: number; updated_at: number; created_at: number };
+type ProfileRow = { id: string; user_id: string; tenant_id: string; slug: string; draft_json: string; published_json: string | null; is_published: number; storage_used_bytes: number; images_count: number; updated_at: number; created_at: number };
 type MediaRow = { id: string; category: MediaCategory; r2_key: string; size_bytes: number; created_at: number };
 type ContactRow = { email: string; phone: string | null; whatsapp: string | null; tenant_id: string };
+type PublicationRow = { id: string; status: 'pending' | 'approved' | 'changes_requested' | 'rejected'; review_note: string | null; submitted_at: number; reviewed_at: number | null; submitted_payload_json: string; submission_locale: Locale };
+type ReviewRequestRow = PublicationRow & { slug: string; owner_name: string; owner_email: string };
+type NotificationRow = { id: string; kind: 'publication_approved' | 'publication_changes_requested' | 'publication_rejected'; title: string; message: string; created_at: number };
 declare const __STATIC_ASSETS__: Record<string, StaticAsset>;
 
 const STATIC_ASSETS: Record<string, StaticAsset> = __STATIC_ASSETS__;
@@ -124,19 +127,30 @@ function profileDraft(value: unknown, fallbackName: string) {
     showWhatsapp: input.showWhatsapp === true, showPhone: input.showPhone === true, showEmail: input.showEmail === true
   };
 }
-function readDraft(value: string | null | undefined, fallbackName: string) { try { return profileDraft(value ? JSON.parse(value) : {}, fallbackName); } catch { return profileDraft({}, fallbackName); } }
+type ProfileSnapshot = { data: ReturnType<typeof profileDraft>; mediaIds: string[]; hasMediaSelection: boolean };
+function mediaIdsOf(value: unknown) { return Array.isArray(value) ? Array.from(new Set(value.filter((item): item is string => typeof item === 'string' && /^media_[a-z0-9-]{36}$/.test(item)))) : []; }
+function snapshotOf(value: string | null | undefined, fallbackName: string): ProfileSnapshot { try { const input = record(value ? JSON.parse(value) : {}); return { data: profileDraft(input, fallbackName), mediaIds: mediaIdsOf(input.mediaIds), hasMediaSelection: Array.isArray(input.mediaIds) }; } catch { return { data: profileDraft({}, fallbackName), mediaIds: [], hasMediaSelection: false }; } }
+function readDraft(value: string | null | undefined, fallbackName: string) { return snapshotOf(value, fallbackName).data; }
+function snapshotJson(data: ReturnType<typeof profileDraft>, mediaIds: string[]) { return JSON.stringify({ ...data, mediaIds: Array.from(new Set(mediaIds)) }); }
 function mediaView(row: MediaRow) { return { id: row.id, category: row.category, sizeBytes: row.size_bytes, url: `/api/media/${encodeURIComponent(row.id)}` }; }
 function isCategory(value: unknown): value is MediaCategory { return value === 'avatar' || value === 'cover' || value === 'skill' || value === 'portfolio'; }
+async function allProfileMedia(env: Env, profileId: string) { return (await env.DB.prepare('SELECT id, category, r2_key, size_bytes, created_at FROM media_assets WHERE profile_id = ? ORDER BY created_at ASC').bind(profileId).all<MediaRow>()).results ?? []; }
+async function selectedMediaIds(env: Env, profile: ProfileRow, fallbackName: string) { const snapshot = snapshotOf(profile.draft_json, fallbackName); if (snapshot.hasMediaSelection) return snapshot.mediaIds; return (await allProfileMedia(env, profile.id)).map((item) => item.id); }
+async function protectedMediaIds(env: Env, profile: ProfileRow, fallbackName: string) { const ids = new Set<string>(profile.published_json ? snapshotOf(profile.published_json, fallbackName).mediaIds : []); const pending = (await env.DB.prepare("SELECT submitted_payload_json FROM publish_requests WHERE profile_id = ? AND status = 'pending'").bind(profile.id).all<{ submitted_payload_json: string }>()).results ?? []; for (const request of pending) for (const id of snapshotOf(request.submitted_payload_json, fallbackName).mediaIds) ids.add(id); return ids; }
+async function cleanUnusedMedia(env: Env, profile: ProfileRow, fallbackName: string) { const keep = new Set(await selectedMediaIds(env, profile, fallbackName)); for (const id of await protectedMediaIds(env, profile, fallbackName)) keep.add(id); const all = await allProfileMedia(env, profile.id); const unused = all.filter((item) => !keep.has(item.id)); if (!unused.length) return; await env.DB.batch([ ...unused.map((item) => env.DB.prepare('DELETE FROM media_assets WHERE id = ? AND profile_id = ?').bind(item.id, profile.id)), env.DB.prepare('UPDATE profiles SET storage_used_bytes = ?, images_count = ?, updated_at = ? WHERE id = ?').bind(all.filter((item) => keep.has(item.id)).reduce((sum, item) => sum + item.size_bytes, 0), all.length - unused.length, Date.now(), profile.id) ]); await Promise.all(unused.map((item) => env.MEDIA.delete(item.r2_key).catch(() => undefined))); }
 function isWebP(bytes: Uint8Array) { return bytes.byteLength >= 12 && decoder.decode(bytes.slice(0, 4)) === 'RIFF' && decoder.decode(bytes.slice(8, 12)) === 'WEBP'; }
 
 async function accountProfileData(env: Env, user: UserRow) {
   const [profile, contact] = await Promise.all([
-    env.DB.prepare('SELECT id, user_id, tenant_id, slug, draft_json, is_published, storage_used_bytes, images_count, updated_at, created_at FROM profiles WHERE user_id = ?').bind(user.id).first<ProfileRow>(),
+    env.DB.prepare('SELECT id, user_id, tenant_id, slug, draft_json, published_json, is_published, storage_used_bytes, images_count, updated_at, created_at FROM profiles WHERE user_id = ?').bind(user.id).first<ProfileRow>(),
     env.DB.prepare('SELECT email, phone, whatsapp, tenant_id FROM users WHERE id = ?').bind(user.id).first<ContactRow>()
   ]);
-  const media = profile ? (await env.DB.prepare('SELECT id, category, r2_key, size_bytes, created_at FROM media_assets WHERE profile_id = ? ORDER BY created_at ASC').bind(profile.id).all<MediaRow>()).results ?? [] : [];
-  const storage = media.reduce((total, item) => total + item.size_bytes, 0);
-  return { slug: profile?.slug ?? '', data: readDraft(profile?.draft_json, user.name), media: media.map(mediaView), imageCount: media.length, storageUsedBytes: storage, exists: Boolean(profile), contact: { email: contact?.email ?? '', phone: contact?.phone ?? '', whatsapp: contact?.whatsapp ?? '' } };
+  const allMedia = profile ? await allProfileMedia(env, profile.id) : [];
+  const snapshot = profile ? snapshotOf(profile.draft_json, user.name) : { data: profileDraft({}, user.name), mediaIds: [], hasMediaSelection: true };
+  const selected = snapshot.hasMediaSelection ? allMedia.filter((item) => snapshot.mediaIds.includes(item.id)) : allMedia;
+  const latest = profile ? await env.DB.prepare('SELECT id, status, review_note, submitted_at, reviewed_at, submitted_payload_json, submission_locale FROM publish_requests WHERE profile_id = ? ORDER BY submitted_at DESC LIMIT 1').bind(profile.id).first<PublicationRow>() : null;
+  const storage = allMedia.reduce((total, item) => total + item.size_bytes, 0);
+  return { slug: profile?.slug ?? '', data: snapshot.data, media: selected.map(mediaView), imageCount: selected.length, storageUsedBytes: storage, exists: Boolean(profile), contact: { email: contact?.email ?? '', phone: contact?.phone ?? '', whatsapp: contact?.whatsapp ?? '' }, publication: { isPublished: Boolean(profile?.is_published), latestStatus: latest?.status ?? null, latestRequestId: latest?.id ?? null, submittedAt: latest?.submitted_at ?? null, reviewNote: latest?.review_note ?? null } };
 }
 
 async function accountProfile(request: Request, env: Env) { const user = await authUser(request, env); if (!user) return responseJson({ ok: false, error: 'unauthorized' }, 401); return responseJson({ ok: true, profile: await accountProfileData(env, user) }); }
@@ -146,19 +160,21 @@ async function saveAccountProfile(request: Request, env: Env) {
   const user = await authUser(request, env); if (!user) return responseJson({ ok: false, error: 'unauthorized' }, 401);
   const input = record(await request.json().catch(() => ({}))); const slug = slugOf(input.slug);
   if (!slug) return responseJson({ ok: false, error: 'invalid_slug' }, 400);
-  const existing = await env.DB.prepare('SELECT id, user_id, tenant_id, slug, draft_json, is_published, storage_used_bytes, images_count, updated_at, created_at FROM profiles WHERE user_id = ?').bind(user.id).first<ProfileRow>();
+  const existing = await env.DB.prepare('SELECT id, user_id, tenant_id, slug, draft_json, published_json, is_published, storage_used_bytes, images_count, updated_at, created_at FROM profiles WHERE user_id = ?').bind(user.id).first<ProfileRow>();
   const clash = await env.DB.prepare('SELECT id FROM profiles WHERE slug = ? AND user_id != ?').bind(slug, user.id).first<{ id: string }>();
   if (clash) return responseJson({ ok: false, error: RESERVED_SLUGS.has(slug) ? 'reserved_slug' : 'slug_taken' }, 409);
-  const data = JSON.stringify(profileDraft(input.data, user.name)); const now = Date.now();
+  const mediaIds = existing ? await selectedMediaIds(env, existing, user.name) : [];
+  const data = snapshotJson(profileDraft(input.data, user.name), mediaIds); const now = Date.now(); let profileId = existing?.id;
   try {
     if (existing) await env.DB.prepare('UPDATE profiles SET slug = ?, draft_json = ?, updated_at = ? WHERE id = ? AND user_id = ?').bind(slug, data, now, existing.id, user.id).run();
     else {
       const owner = await env.DB.prepare('SELECT tenant_id FROM users WHERE id = ?').bind(user.id).first<{ tenant_id: string }>();
       if (!owner) return responseJson({ ok: false, error: 'unauthorized' }, 401);
-      await env.DB.prepare('INSERT INTO profiles (id, user_id, tenant_id, slug, is_published, published_version_id, draft_json, published_json, allow_search_indexing, active_days_balance, featured_until, storage_used_bytes, images_count, updated_at, created_at) VALUES (?, ?, ?, ?, 0, NULL, ?, NULL, 1, 0, NULL, 0, 0, ?, ?)').bind(`profile_${crypto.randomUUID()}`, user.id, owner.tenant_id, slug, data, now, now).run();
+      profileId = `profile_${crypto.randomUUID()}`;
+      await env.DB.prepare('INSERT INTO profiles (id, user_id, tenant_id, slug, is_published, published_version_id, draft_json, published_json, allow_search_indexing, active_days_balance, featured_until, storage_used_bytes, images_count, updated_at, created_at) VALUES (?, ?, ?, ?, 0, NULL, ?, NULL, 1, 0, NULL, 0, 0, ?, ?)').bind(profileId, user.id, owner.tenant_id, slug, data, now, now).run();
     }
   } catch { return responseJson({ ok: false, error: 'slug_taken' }, 409); }
-  await env.DB.prepare('INSERT INTO audit_logs (id, tenant_id, actor_id, action, target_type, target_id, details_json, ip_hash, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)').bind(crypto.randomUUID(), 'tenant_main', user.id, 'profile_draft_saved', 'profile', existing?.id ?? user.id, JSON.stringify({ slug }), toBase64(await digest(request.headers.get('CF-Connecting-IP') ?? 'unknown')), now).run();
+  await env.DB.prepare('INSERT INTO audit_logs (id, tenant_id, actor_id, action, target_type, target_id, details_json, ip_hash, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)').bind(crypto.randomUUID(), existing?.tenant_id ?? 'tenant_main', user.id, 'profile_draft_saved', 'profile', profileId ?? user.id, JSON.stringify({ slug }), toBase64(await digest(request.headers.get('CF-Connecting-IP') ?? 'unknown')), now).run();
   return responseJson({ ok: true, profile: await accountProfileData(env, user) });
 }
 
@@ -167,42 +183,50 @@ async function uploadProfileMedia(request: Request, env: Env) {
   const user = await authUser(request, env); if (!user) return responseJson({ ok: false, error: 'unauthorized' }, 401);
   const form = await request.formData().catch(() => null); const category = form?.get('category'); const file = form?.get('file');
   if (!isCategory(category) || !(file instanceof File) || file.type !== 'image/webp') return responseJson({ ok: false, error: 'invalid_image' }, 400);
-  const profile = await env.DB.prepare('SELECT id, user_id, tenant_id, slug, draft_json, is_published, storage_used_bytes, images_count, updated_at, created_at FROM profiles WHERE user_id = ?').bind(user.id).first<ProfileRow>();
+  const profile = await env.DB.prepare('SELECT id, user_id, tenant_id, slug, draft_json, published_json, is_published, storage_used_bytes, images_count, updated_at, created_at FROM profiles WHERE user_id = ?').bind(user.id).first<ProfileRow>();
   if (!profile) return responseJson({ ok: false, error: 'profile_required' }, 400);
+  const pending = await env.DB.prepare("SELECT id FROM publish_requests WHERE profile_id = ? AND status = 'pending' LIMIT 1").bind(profile.id).first<{ id: string }>();
+  if (pending) return responseJson({ ok: false, error: 'media_under_review' }, 409);
   const bytes = new Uint8Array(await file.arrayBuffer());
   if (!isWebP(bytes) || bytes.byteLength < 64 || bytes.byteLength > 2 * 1024 * 1024) return responseJson({ ok: false, error: 'invalid_image' }, 400);
-  const categoryRows = (await env.DB.prepare('SELECT id, category, r2_key, size_bytes, created_at FROM media_assets WHERE profile_id = ? AND category = ? ORDER BY created_at ASC').bind(profile.id, category).all<MediaRow>()).results ?? [];
-  const allRows = (await env.DB.prepare('SELECT id, category, r2_key, size_bytes, created_at FROM media_assets WHERE profile_id = ?').bind(profile.id).all<MediaRow>()).results ?? [];
+  const allRows = await allProfileMedia(env, profile.id); const selectedIds = await selectedMediaIds(env, profile, user.name);
+  const categoryRows = allRows.filter((item) => selectedIds.includes(item.id) && item.category === category);
   const replacements = category === 'avatar' || category === 'cover' ? categoryRows : [];
   if (!replacements.length && categoryRows.length >= IMAGE_MAXIMUMS[category]) return responseJson({ ok: false, error: 'image_limit' }, 400);
-  const used = allRows.reduce((total, item) => total + item.size_bytes, 0) - replacements.reduce((total, item) => total + item.size_bytes, 0);
-  if (used + bytes.byteLength > IMAGE_STORAGE_LIMIT || allRows.length - replacements.length + 1 > 9) return responseJson({ ok: false, error: 'storage_limit' }, 400);
+  const protectedIds = await protectedMediaIds(env, profile, user.name); const deleteNow = replacements.filter((item) => !protectedIds.has(item.id));
+  const storageAfter = allRows.reduce((total, item) => total + item.size_bytes, 0) - deleteNow.reduce((total, item) => total + item.size_bytes, 0) + bytes.byteLength;
+  if (storageAfter > IMAGE_STORAGE_LIMIT) return responseJson({ ok: false, error: 'storage_limit' }, 400);
   const id = `media_${crypto.randomUUID()}`; const key = `profiles/${user.id}/${category}/${crypto.randomUUID()}.webp`; const now = Date.now();
+  const newSelection = [...selectedIds.filter((item) => !replacements.some((replacement) => replacement.id === item)), id];
+  const nextDraft = snapshotJson(snapshotOf(profile.draft_json, user.name).data, newSelection);
   try {
     await env.MEDIA.put(key, bytes, { httpMetadata: { contentType: 'image/webp', cacheControl: 'public, max-age=31536000, immutable' }, customMetadata: { userId: user.id, profileId: profile.id, category } });
     await env.DB.batch([
-      ...replacements.map((item) => env.DB.prepare('DELETE FROM media_assets WHERE id = ? AND profile_id = ?').bind(item.id, profile.id)),
+      ...deleteNow.map((item) => env.DB.prepare('DELETE FROM media_assets WHERE id = ? AND profile_id = ?').bind(item.id, profile.id)),
       env.DB.prepare('INSERT INTO media_assets (id, user_id, profile_id, category, r2_key, size_bytes, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)').bind(id, user.id, profile.id, category, key, bytes.byteLength, now),
-      env.DB.prepare('UPDATE profiles SET storage_used_bytes = ?, images_count = ?, updated_at = ? WHERE id = ?').bind(used + bytes.byteLength, allRows.length - replacements.length + 1, now, profile.id),
+      env.DB.prepare('UPDATE profiles SET draft_json = ?, storage_used_bytes = ?, images_count = ?, updated_at = ? WHERE id = ?').bind(nextDraft, storageAfter, allRows.length - deleteNow.length + 1, now, profile.id),
       env.DB.prepare('INSERT INTO audit_logs (id, tenant_id, actor_id, action, target_type, target_id, details_json, ip_hash, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)').bind(crypto.randomUUID(), profile.tenant_id, user.id, 'profile_media_uploaded', 'media', id, JSON.stringify({ category, size: bytes.byteLength }), toBase64(await digest(request.headers.get('CF-Connecting-IP') ?? 'unknown')), now)
     ]);
   } catch { await env.MEDIA.delete(key).catch(() => undefined); return responseJson({ ok: false, error: 'invalid_image' }, 400); }
-  await Promise.all(replacements.map((item) => env.MEDIA.delete(item.r2_key).catch(() => undefined)));
+  await Promise.all(deleteNow.map((item) => env.MEDIA.delete(item.r2_key).catch(() => undefined)));
   return responseJson({ ok: true, profile: await accountProfileData(env, user) });
 }
 
 async function deleteProfileMedia(request: Request, env: Env, id: string) {
   if (!sameOrigin(request)) return responseJson({ ok: false, error: 'invalid_request' }, 403);
   const user = await authUser(request, env); if (!user) return responseJson({ ok: false, error: 'unauthorized' }, 401);
-  const media = await env.DB.prepare('SELECT m.id, m.category, m.r2_key, m.size_bytes, m.created_at, p.id AS profile_id, p.tenant_id FROM media_assets m JOIN profiles p ON p.id = m.profile_id WHERE m.id = ? AND m.user_id = ?').bind(id, user.id).first<MediaRow & { profile_id: string; tenant_id: string }>();
+  const profile = await env.DB.prepare('SELECT id, user_id, tenant_id, slug, draft_json, published_json, is_published, storage_used_bytes, images_count, updated_at, created_at FROM profiles WHERE user_id = ?').bind(user.id).first<ProfileRow>();
+  if (!profile) return responseJson({ ok: false, error: 'not_found' }, 404);
+  const media = await env.DB.prepare('SELECT id, category, r2_key, size_bytes, created_at FROM media_assets WHERE id = ? AND profile_id = ? AND user_id = ?').bind(id, profile.id, user.id).first<MediaRow>();
   if (!media) return responseJson({ ok: false, error: 'not_found' }, 404);
-  const now = Date.now();
+  const selectedIds = await selectedMediaIds(env, profile, user.name); if (!selectedIds.includes(media.id)) return responseJson({ ok: false, error: 'not_found' }, 404);
+  const now = Date.now(); const nextDraft = snapshotJson(snapshotOf(profile.draft_json, user.name).data, selectedIds.filter((item) => item !== media.id)); const protectedIds = await protectedMediaIds(env, profile, user.name); const retain = protectedIds.has(media.id);
   await env.DB.batch([
-    env.DB.prepare('DELETE FROM media_assets WHERE id = ? AND user_id = ?').bind(media.id, user.id),
-    env.DB.prepare('UPDATE profiles SET storage_used_bytes = MAX(0, storage_used_bytes - ?), images_count = MAX(0, images_count - 1), updated_at = ? WHERE id = ?').bind(media.size_bytes, now, media.profile_id),
-    env.DB.prepare('INSERT INTO audit_logs (id, tenant_id, actor_id, action, target_type, target_id, details_json, ip_hash, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)').bind(crypto.randomUUID(), media.tenant_id, user.id, 'profile_media_deleted', 'media', media.id, JSON.stringify({ category: media.category }), toBase64(await digest(request.headers.get('CF-Connecting-IP') ?? 'unknown')), now)
+    ...(retain ? [] : [env.DB.prepare('DELETE FROM media_assets WHERE id = ? AND profile_id = ?').bind(media.id, profile.id)]),
+    env.DB.prepare('UPDATE profiles SET draft_json = ?, storage_used_bytes = ?, images_count = ?, updated_at = ? WHERE id = ?').bind(nextDraft, retain ? profile.storage_used_bytes : Math.max(0, profile.storage_used_bytes - media.size_bytes), retain ? profile.images_count : Math.max(0, profile.images_count - 1), now, profile.id),
+    env.DB.prepare('INSERT INTO audit_logs (id, tenant_id, actor_id, action, target_type, target_id, details_json, ip_hash, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)').bind(crypto.randomUUID(), profile.tenant_id, user.id, 'profile_media_removed_from_draft', 'media', media.id, JSON.stringify({ category: media.category, retainedForPublishedVersion: retain }), toBase64(await digest(request.headers.get('CF-Connecting-IP') ?? 'unknown')), now)
   ]);
-  await env.MEDIA.delete(media.r2_key).catch(() => undefined);
+  if (!retain) await env.MEDIA.delete(media.r2_key).catch(() => undefined);
   return responseJson({ ok: true, profile: await accountProfileData(env, user) });
 }
 
@@ -215,11 +239,93 @@ async function mediaAsset(env: Env, id: string) {
 }
 
 async function publicProfile(env: Env, slug: string) {
-  const profile = await env.DB.prepare('SELECT p.id, p.user_id, p.tenant_id, p.slug, p.draft_json, p.is_published, p.storage_used_bytes, p.images_count, p.updated_at, p.created_at, u.name, u.email, u.phone, u.whatsapp FROM profiles p JOIN users u ON u.id = p.user_id WHERE p.slug = ? AND u.status = ?').bind(slug, 'active').first<ProfileRow & { name: string; email: string; phone: string | null; whatsapp: string | null }>();
+  const profile = await env.DB.prepare("SELECT p.id, p.user_id, p.tenant_id, p.slug, p.draft_json, p.published_json, p.is_published, p.storage_used_bytes, p.images_count, p.updated_at, p.created_at, u.name, u.email, u.phone, u.whatsapp FROM profiles p JOIN users u ON u.id = p.user_id WHERE p.slug = ? AND p.is_published = 1 AND p.published_json IS NOT NULL AND u.status = 'active'").bind(slug).first<ProfileRow & { name: string; email: string; phone: string | null; whatsapp: string | null }>();
   if (!profile) return responseJson({ ok: false, error: 'not_found' }, 404);
-  const media = (await env.DB.prepare('SELECT id, category, r2_key, size_bytes, created_at FROM media_assets WHERE profile_id = ? ORDER BY created_at ASC').bind(profile.id).all<MediaRow>()).results ?? [];
-  const data = readDraft(profile.draft_json, profile.name);
-  return responseJson({ ok: true, profile: { slug: profile.slug, data, media: media.map(mediaView), contact: { email: data.showEmail ? profile.email : '', phone: data.showPhone ? profile.phone ?? '' : '', whatsapp: data.showWhatsapp ? profile.whatsapp ?? '' : '' } } });
+  const snapshot = snapshotOf(profile.published_json, profile.name); const all = await allProfileMedia(env, profile.id); const media = snapshot.hasMediaSelection ? all.filter((item) => snapshot.mediaIds.includes(item.id)) : all;
+  return responseJson({ ok: true, profile: { slug: profile.slug, data: snapshot.data, media: media.map(mediaView), contact: { email: snapshot.data.showEmail ? profile.email : '', phone: snapshot.data.showPhone ? profile.phone ?? '' : '', whatsapp: snapshot.data.showWhatsapp ? profile.whatsapp ?? '' : '' } } });
+}
+
+const publicationMail = {
+  ar: {
+    approved: { subject: 'تم اعتماد موقعك في الهوية الرقمية لكبار الشخصيات', title: 'تم اعتماد موقعك', text: 'اعتمد المشرف البشري النسخة التي أرسلتها، وأصبحت متاحة للزوار.' },
+    changes_requested: { subject: 'طُلب تعديل موقعك في الهوية الرقمية لكبار الشخصيات', title: 'طُلب تعديل موقعك', text: 'راجع ملاحظة المشرف وعدّل المسودة ثم أرسلها للمراجعة من جديد.' },
+    rejected: { subject: 'لم يُعتمد طلب موقعك في الهوية الرقمية لكبار الشخصيات', title: 'لم يُعتمد طلب موقعك', text: 'راجع ملاحظة المشرف قبل إرسال طلب جديد.' }
+  },
+  en: {
+    approved: { subject: 'Your VIP Digital ID site was approved', title: 'Your site was approved', text: 'A human reviewer approved the version you submitted, and it is now available to visitors.' },
+    changes_requested: { subject: 'Changes were requested for your VIP Digital ID site', title: 'Changes were requested', text: 'Review the reviewer note, update your draft, and submit it again.' },
+    rejected: { subject: 'Your VIP Digital ID site request was not approved', title: 'Your request was not approved', text: 'Review the reviewer note before submitting a new request.' }
+  }
+};
+function htmlSafe(value: string) { return value.replace(/[&<>"']/g, (character) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[character] ?? character); }
+async function sendPublicationDecision(env: Env, email: string, locale: Locale, decision: 'approved' | 'changes_requested' | 'rejected', note: string, requestId: string) {
+  const copy = publicationMail[locale][decision]; const reason = note ? `\n\n${locale === 'ar' ? 'ملاحظة المشرف:' : 'Reviewer note:'}\n${note}` : ''; const direction = locale === 'ar' ? 'rtl' : 'ltr';
+  const response = await env.MAILER.fetch(new Request('https://mailer/v1/support/send', { method: 'POST', headers: { 'content-type': 'application/json', 'idempotency-key': `vipdid-publication-${requestId}-${decision}` }, body: JSON.stringify({ to: email, subject: copy.subject, text: `${copy.title}\n\n${copy.text}${reason}`, html: `<div dir="${direction}" lang="${locale}"><h1>${htmlSafe(copy.title)}</h1><p>${htmlSafe(copy.text)}</p>${note ? `<p><strong>${locale === 'ar' ? 'ملاحظة المشرف:' : 'Reviewer note:'}</strong><br>${htmlSafe(note)}</p>` : ''}</div>` }) }));
+  return response.ok;
+}
+
+async function submitPublication(request: Request, env: Env) {
+  if (!sameOrigin(request)) return responseJson({ ok: false, error: 'invalid_request' }, 403);
+  const user = await authUser(request, env); if (!user) return responseJson({ ok: false, error: 'unauthorized' }, 401);
+  const input = record(await request.json().catch(() => ({}))); const locale = localeOf(input.locale);
+  const profile = await env.DB.prepare('SELECT id, user_id, tenant_id, slug, draft_json, published_json, is_published, storage_used_bytes, images_count, updated_at, created_at FROM profiles WHERE user_id = ?').bind(user.id).first<ProfileRow>();
+  if (!profile) return responseJson({ ok: false, error: 'profile_required' }, 400);
+  const pending = await env.DB.prepare("SELECT id FROM publish_requests WHERE profile_id = ? AND status = 'pending' LIMIT 1").bind(profile.id).first<{ id: string }>();
+  if (pending) return responseJson({ ok: false, error: 'request_pending' }, 409);
+  const mediaIds = await selectedMediaIds(env, profile, user.name); const snapshot = snapshotJson(snapshotOf(profile.draft_json, user.name).data, mediaIds); const id = `publish_${crypto.randomUUID()}`; const now = Date.now();
+  await env.DB.batch([
+    env.DB.prepare('INSERT INTO publish_requests (id, profile_id, user_id, tenant_id, submitted_payload_json, status, reviewer_id, review_note, submission_locale, submitted_at, reviewed_at) VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?, NULL)').bind(id, profile.id, user.id, profile.tenant_id, snapshot, 'pending', locale, now),
+    env.DB.prepare('INSERT INTO audit_logs (id, tenant_id, actor_id, action, target_type, target_id, details_json, ip_hash, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)').bind(crypto.randomUUID(), profile.tenant_id, user.id, profile.is_published ? 'publication_update_submitted' : 'publication_initial_submitted', 'publish_request', id, JSON.stringify({ slug: profile.slug, mediaCount: mediaIds.length }), toBase64(await digest(request.headers.get('CF-Connecting-IP') ?? 'unknown')), now)
+  ]);
+  return responseJson({ ok: true, profile: await accountProfileData(env, user) }, 202);
+}
+
+async function accountNotifications(request: Request, env: Env) { const user = await authUser(request, env); if (!user) return responseJson({ ok: false, error: 'unauthorized' }, 401); const entries = (await env.DB.prepare('SELECT id, kind, title, message, created_at FROM notifications WHERE user_id = ? ORDER BY created_at DESC LIMIT 12').bind(user.id).all<NotificationRow>()).results ?? []; return responseJson({ ok: true, notifications: entries.map((item) => ({ id: item.id, kind: item.kind, title: item.title, message: item.message, createdAt: item.created_at })) }); }
+
+async function adminPublishRequests(request: Request, env: Env) {
+  const reviewer = await authUser(request, env); if (!reviewer) return responseJson({ ok: false, error: 'unauthorized' }, 401); if (reviewer.role !== 'super_admin') return responseJson({ ok: false, error: 'forbidden' }, 403);
+  const entries = (await env.DB.prepare("SELECT r.id, r.status, r.review_note, r.submitted_at, r.reviewed_at, r.submitted_payload_json, r.submission_locale, p.slug, u.name AS owner_name, u.email AS owner_email FROM publish_requests r JOIN profiles p ON p.id = r.profile_id JOIN users u ON u.id = r.user_id WHERE r.status = 'pending' ORDER BY r.submitted_at ASC LIMIT 50").all<ReviewRequestRow>()).results ?? [];
+  return responseJson({ ok: true, requests: entries.map((item) => ({ id: item.id, status: item.status, reviewNote: item.review_note, submittedAt: item.submitted_at, slug: item.slug, ownerName: item.owner_name, ownerEmail: item.owner_email, submissionLocale: item.submission_locale, snapshot: (() => { const snapshot = snapshotOf(item.submitted_payload_json, item.owner_name); return { data: snapshot.data, mediaIds: snapshot.mediaIds }; })() })) });
+}
+
+async function decidePublication(request: Request, env: Env, requestId: string) {
+  if (!sameOrigin(request)) return responseJson({ ok: false, error: 'invalid_request' }, 403);
+  const reviewer = await authUser(request, env); if (!reviewer) return responseJson({ ok: false, error: 'unauthorized' }, 401); if (reviewer.role !== 'super_admin') return responseJson({ ok: false, error: 'forbidden' }, 403);
+  const input = record(await request.json().catch(() => ({}))); const decision = input.decision; const note = textOf(input.note, 800);
+  if (decision !== 'approved' && decision !== 'changes_requested' && decision !== 'rejected') return responseJson({ ok: false, error: 'invalid_request' }, 400);
+  if (decision !== 'approved' && !note) return responseJson({ ok: false, error: 'reason_required' }, 400);
+  const recordRequest = await env.DB.prepare("SELECT r.id, r.profile_id, r.user_id, r.tenant_id, r.status, r.review_note, r.submitted_at, r.reviewed_at, r.submitted_payload_json, r.submission_locale, p.slug, u.name AS owner_name, u.email AS owner_email FROM publish_requests r JOIN profiles p ON p.id = r.profile_id JOIN users u ON u.id = r.user_id WHERE r.id = ?").bind(requestId).first<ReviewRequestRow & { profile_id: string; user_id: string; tenant_id: string }>();
+  if (!recordRequest) return responseJson({ ok: false, error: 'not_found' }, 404); if (recordRequest.status !== 'pending') return responseJson({ ok: false, error: 'decision_recorded' }, 409);
+  const now = Date.now(); const changed = await env.DB.prepare("UPDATE publish_requests SET status = ?, reviewer_id = ?, review_note = ?, reviewed_at = ? WHERE id = ? AND status = 'pending'").bind(decision, reviewer.id, note || null, now, requestId).run();
+  if (!changed.meta.changes) return responseJson({ ok: false, error: 'decision_recorded' }, 409);
+  if (decision === 'approved') await env.DB.prepare('UPDATE profiles SET published_json = ?, published_version_id = ?, is_published = 1, updated_at = ? WHERE id = ?').bind(recordRequest.submitted_payload_json, recordRequest.id, now, recordRequest.profile_id).run();
+  const message = publicationMail[recordRequest.submission_locale][decision]; const notificationKind = `publication_${decision}` as NotificationRow['kind'];
+  await env.DB.batch([
+    env.DB.prepare('INSERT INTO notifications (id, user_id, request_id, kind, locale, title, message, is_read, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?)').bind(`notice_${crypto.randomUUID()}`, recordRequest.user_id, requestId, notificationKind, recordRequest.submission_locale, message.title, note ? `${message.text}\n\n${recordRequest.submission_locale === 'ar' ? 'ملاحظة المشرف:' : 'Reviewer note:'}\n${note}` : message.text, now),
+    env.DB.prepare('INSERT INTO audit_logs (id, tenant_id, actor_id, action, target_type, target_id, details_json, ip_hash, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)').bind(crypto.randomUUID(), recordRequest.tenant_id, reviewer.id, `publication_${decision}`, 'publish_request', requestId, JSON.stringify({ slug: recordRequest.slug, reviewedAt: now }), toBase64(await digest(request.headers.get('CF-Connecting-IP') ?? 'unknown')), now)
+  ]);
+  if (decision === 'approved') { const profile = await env.DB.prepare('SELECT id, user_id, tenant_id, slug, draft_json, published_json, is_published, storage_used_bytes, images_count, updated_at, created_at FROM profiles WHERE id = ?').bind(recordRequest.profile_id).first<ProfileRow>(); if (profile) await cleanUnusedMedia(env, profile, recordRequest.owner_name); }
+  const delivered = await sendPublicationDecision(env, recordRequest.owner_email, recordRequest.submission_locale, decision, note, requestId).catch(() => false);
+  await env.DB.prepare('INSERT INTO audit_logs (id, tenant_id, actor_id, action, target_type, target_id, details_json, ip_hash, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)').bind(crypto.randomUUID(), recordRequest.tenant_id, reviewer.id, 'publication_decision_notification', 'publish_request', requestId, JSON.stringify({ delivered }), toBase64(await digest(request.headers.get('CF-Connecting-IP') ?? 'unknown')), Date.now()).run();
+  return responseJson({ ok: true, delivered });
+}
+
+function validGiftLink(value: unknown) { try { const url = new URL(typeof value === 'string' ? value.trim() : ''); return ['https:', 'http:'].includes(url.protocol) && url.href.length <= 900 ? url.href : null; } catch { return null; } }
+async function confirmGift(request: Request, env: Env) {
+  if (!sameOrigin(request)) return responseJson({ ok: false, error: 'invalid_request' }, 403);
+  const user = await authUser(request, env); if (!user) return responseJson({ ok: false, error: 'unauthorized' }, 401);
+  const input = record(await request.json().catch(() => ({}))); const recipient = textOf(input.recipient, 120); const link = validGiftLink(input.link); const idempotencyKey = typeof input.idempotencyKey === 'string' && /^gift_[a-z0-9-]{36}$/.test(input.idempotencyKey) ? input.idempotencyKey : null;
+  if (!recipient || !link || !idempotencyKey) return responseJson({ ok: false, error: 'invalid_input' }, 400);
+  const prior = await env.DB.prepare('SELECT id FROM ledger_entries WHERE idempotency_key = ? AND actor_id = ?').bind(idempotencyKey, user.id).first<{ id: string }>();
+  if (prior) { const current = await env.DB.prepare('SELECT id, permanent_id, name, role, wallet_balance, email_verified_at, status, pin_hash, pin_salt, failed_login_attempts, locked_until FROM users WHERE id = ?').bind(user.id).first<UserRow>(); return responseJson({ ok: true, alreadyProcessed: true, user: current ? userView(current) : userView(user) }); }
+  const now = Date.now(); const result = await env.DB.batch([
+    env.DB.prepare('UPDATE users SET wallet_balance = wallet_balance - 100 WHERE id = ? AND wallet_balance >= 100').bind(user.id),
+    env.DB.prepare("INSERT INTO ledger_entries (id, idempotency_key, from_account, to_account, amount, tx_type, metadata_json, actor_id, created_at) SELECT ?, ?, ?, ?, 100, ?, ?, ?, ? WHERE changes() = 1").bind(`ledger_${crypto.randomUUID()}`, idempotencyKey, user.id, 'treasury', 'gift_qr', JSON.stringify({ service: 'client_side_qr_gift' }), user.id, now)
+  ]);
+  if (!result[0].meta.changes) return responseJson({ ok: false, error: 'insufficient_balance' }, 409);
+  await env.DB.prepare('INSERT INTO audit_logs (id, tenant_id, actor_id, action, target_type, target_id, details_json, ip_hash, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)').bind(crypto.randomUUID(), 'tenant_main', user.id, 'gift_qr_confirmed', 'ledger_entry', idempotencyKey, JSON.stringify({ amount: 100 }), toBase64(await digest(request.headers.get('CF-Connecting-IP') ?? 'unknown')), now).run();
+  const current = await env.DB.prepare('SELECT id, permanent_id, name, role, wallet_balance, email_verified_at, status, pin_hash, pin_salt, failed_login_attempts, locked_until FROM users WHERE id = ?').bind(user.id).first<UserRow>();
+  return responseJson({ ok: true, user: current ? userView(current) : userView(user) });
 }
 
 async function me(request: Request, env: Env) { const user = await authUser(request, env); return responseJson({ ok: true, authenticated: Boolean(user), user: user ? userView(user) : null }); }
@@ -250,6 +356,11 @@ export default {
     if (url.pathname === '/api/account/profile' && request.method === 'PUT') return saveAccountProfile(request, env);
     if (url.pathname === '/api/account/media' && request.method === 'POST') return uploadProfileMedia(request, env);
     if (url.pathname.startsWith('/api/account/media/') && request.method === 'DELETE') return deleteProfileMedia(request, env, decodeURIComponent(url.pathname.slice('/api/account/media/'.length)));
+    if (url.pathname === '/api/account/publication' && request.method === 'POST') return submitPublication(request, env);
+    if (url.pathname === '/api/account/notifications' && request.method === 'GET') return accountNotifications(request, env);
+    if (url.pathname === '/api/account/gifts' && request.method === 'POST') return confirmGift(request, env);
+    if (url.pathname === '/api/admin/publish-requests' && request.method === 'GET') return adminPublishRequests(request, env);
+    if (url.pathname.startsWith('/api/admin/publish-requests/') && url.pathname.endsWith('/decision') && request.method === 'POST') return decidePublication(request, env, decodeURIComponent(url.pathname.slice('/api/admin/publish-requests/'.length, -'/decision'.length)));
     const asset = staticAsset(url.pathname);
     if (asset) return secure(asset);
     const profile = request.method === 'GET' ? routeSlug(url.pathname) : null;
