@@ -34,7 +34,7 @@ if (worker.includes("frame-ancestors 'none'") || worker.includes("frame-ancestor
 if (/const sequence = Math\.max\(1, Number\(await setting\(env, 'next_permanent_id_seq'\)/.test(worker)) throw new Error('worker/template.ts: legacy read/write permanent ID allocation remains');
 
 requireText('database/migrations/0008_security_stability.sql', ['ALTER TABLE tenants ADD COLUMN custom_domain', 'idx_tenants_custom_domain']);
-requireText('database/schema.sql', ['custom_domain TEXT UNIQUE COLLATE NOCASE', 'idx_tenants_custom_domain']);
+requireText('database/schema.sql', ['custom_domain TEXT COLLATE NOCASE', 'idx_tenants_custom_domain']);
 requireText('src/components/SovereignDashboard.tsx', ['stepUpPin', 'text.stepUpLead']);
 requireText('src/components/PartnerDashboard.tsx', ['stepUpPin', 'text.stepUpLead']);
 requireText('src/components/WalletPortal.tsx', ['adminPin', 'stepUpPin: adminPin']);

@@ -13,7 +13,7 @@ CREATE TABLE IF NOT EXISTS tenants (
   name_en TEXT NOT NULL,
   logo_url TEXT,
   cover_url TEXT,
-  custom_domain TEXT UNIQUE COLLATE NOCASE,
+  custom_domain TEXT COLLATE NOCASE,
   description_ar TEXT,
   description_en TEXT,
   theme_config_json TEXT NOT NULL DEFAULT '{}',
