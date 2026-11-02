@@ -33,6 +33,7 @@ while (logoBuffer.byteLength > 300000 && quality > 68) {
 if (logoBuffer.byteLength > 300000) throw new Error('The processed logo exceeds 300 KB.');
 await fs.writeFile(path.join(outputDir, 'logo.webp'), logoBuffer);
 await sharp(logoBuffer).resize(512, 512, { fit: 'contain', background: { r: 0, g: 0, b: 0, alpha: 0 } }).webp({ quality: 90, alphaQuality: 100, effort: 6 }).toFile(path.join(outputDir, 'logo-icon.webp'));
+await sharp(logoBuffer).resize(192, 192, { fit: 'contain', background: { r: 0, g: 0, b: 0, alpha: 0 } }).webp({ quality: 90, alphaQuality: 100, effort: 6 }).toFile(path.join(outputDir, 'logo-icon-192.webp'));
 
 async function makeCover(source, destination) {
   await sharp(source)
@@ -46,7 +47,7 @@ await Promise.all([
   makeCover(sources.light, path.join(outputDir, 'cover-light.webp'))
 ]);
 
-const checks = await Promise.all(['logo.webp', 'cover.webp', 'cover-light.webp'].map(async (name) => {
+const checks = await Promise.all(['logo.webp', 'logo-icon-192.webp', 'logo-icon.webp', 'cover.webp', 'cover-light.webp'].map(async (name) => {
   const target = path.join(outputDir, name);
   const [metadata, stat] = await Promise.all([sharp(target).metadata(), fs.stat(target)]);
   return { name, bytes: stat.size, width: metadata.width, height: metadata.height, hasAlpha: metadata.hasAlpha ?? false };

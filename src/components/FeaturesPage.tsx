@@ -1,3 +1,4 @@
+import { platformConfig } from '../config/platform.config';
 import type { Copy, Locale } from '../i18n/content';
 import { PlatformMasthead, ScrollPills } from './SiteChrome';
 
@@ -28,7 +29,7 @@ export function FeaturesPage({ text, onNavigate }: Props) {
         {cards.map((card, index) => <article className="feature-card" id={card.id} key={card.id}><span>{String(index + 1).padStart(2, '0')}</span><h2>{card.title}</h2><p>{card.body}</p></article>)}
       </section>
       <section className="feature-article" id="feature-article"><p className="eyebrow">{text.featureEyebrow}</p><h2>{text.articleTitle}</h2><p>{text.articleBody}</p><button className="gold-button" type="button" onClick={() => onNavigate('/')}>{text.returnHome}</button></section>
-      <footer className="site-footer"><p>{text.footerOwner}</p><button type="button" onClick={() => onNavigate('/')}>{text.returnHome}</button><p>{text.copyright}</p></footer>
+      <footer className="site-footer"><p>{text.footerOwner}</p><div className="footer-actions"><button type="button" onClick={() => onNavigate('/')}>{text.returnHome}</button><button type="button" onClick={() => onNavigate('/privacy')}>{text.privacy}</button><button type="button" onClick={() => onNavigate('/terms')}>{text.terms}</button><a href={`https://wa.me/${platformConfig.contact.whatsapp}`}>{text.whatsappLabel}</a><a href={`mailto:${platformConfig.contact.supportEmail}`}>{text.emailLabel}</a><a href={`mailto:${text.ownerEmail}`}>{text.ownerEmailLabel}</a></div><p>{text.copyright}</p></footer>
     </div>
   );
 }

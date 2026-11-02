@@ -1,13 +1,18 @@
 {
+  "id": "/",
   "name": "VIP Digital ID",
   "short_name": "VIP Digital ID",
+  "description": "A private digital identity platform for presence, privacy, and accessible reach.",
   "lang": "en",
   "dir": "ltr",
   "start_url": "/?lang=en",
+  "scope": "/",
   "display": "standalone",
+  "orientation": "any",
   "background_color": "#090b0e",
   "theme_color": "#090b0e",
   "icons": [
+    { "src": "/brand/logo-icon-192.webp", "sizes": "192x192", "type": "image/webp", "purpose": "any" },
     { "src": "/brand/logo-icon.webp", "sizes": "512x512", "type": "image/webp", "purpose": "any maskable" }
   ]
 }

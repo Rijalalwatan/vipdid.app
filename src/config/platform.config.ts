@@ -9,6 +9,13 @@ export const platformConfig = {
     ar: 'شركة الهوية الرقمية',
     en: 'Digital id Company'
   },
+  legal: {
+    copyright: {
+      ar: 'جميع الحقوق محفوظة لمنصة رجال السعودية KSA MEN',
+      en: 'All rights reserved to KSA MEN platform'
+    },
+    privacyContact: 'vip.did.app@gmail.com'
+  },
   contact: {
     ownerEmail: 'rijalalwatan.com@gmail.com',
     supportEmail: 'vip.did.app@gmail.com',

@@ -26,7 +26,7 @@ export const sovereigntyContent: Record<SovereigntyLocale, Copy> = {
     treasuryTitle: 'الخزينة المركزية', treasuryLead: 'رصيد نقطة الوسط المركزي تحت السيادة المباشرة للمالك.', auditTitle: 'سجل التدقيق', auditLead: 'أحدث العمليات السيادية والقرارات المسجلة.',
     partnerTitle: 'لوحة العضيد', partnerLead: 'إدارة مستقلة لنطاقك ضمن السيادة المركزية للمنصة.', usersTitle: 'مستخدمو النطاق', reviewsTitle: 'طلبات النشر', settingsTitle: 'هوية النطاق',
     requestPartner: 'طلب عضيد', requestPartnerLead: 'اطلب نطاقك الفرعي ليخضع لاعتماد المالك الرئيسي.', submitRequest: 'إرسال الطلب', requested: 'تم إرسال الطلب للاعتماد.',
-    custodyTitle: 'استلام العهدة', custodyLead: 'أكد استلام الإدارة وحدد رمز PIN خاصاً بك.', custodyPin: 'رمز PIN من ستة أرقام', confirmCustody: 'تأكيد الاستلام', custodyAccepted: 'تم تسليم العهدة بنجاح.', custodyInvalid: 'رابط العهدة غير صالح أو منتهٍ.',
+    custodyTitle: 'استلام العهدة', custodyLead: 'أكد استلام الإدارة وحدد رمز دخول خاصاً بك.', custodyPin: 'رمز دخول من ستة أرقام', confirmCustody: 'تأكيد الاستلام', custodyAccepted: 'تم تسليم العهدة بنجاح.', custodyInvalid: 'رابط العهدة غير صالح أو منتهٍ.',
     loading: 'جارٍ التحميل', save: 'حفظ', cancel: 'إلغاء', error: 'تعذر إتمام العملية. راجع البيانات وحاول مرة أخرى.', success: 'تمت العملية بنجاح.'
   },
   en: {
