@@ -14,6 +14,7 @@ requireText('worker/template.ts', [
   "manifest-src 'self'",
   "worker-src 'self'",
   "SameSite=None",
+  "iterations: 100000",
   "function sameOrigin(request: Request)",
   "sec-fetch-site",
   "if (!sameOrigin(request)) return responseJson({ ok: false, reason: 'invalid_request' }, 403);",

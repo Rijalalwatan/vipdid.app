@@ -1,7 +1,7 @@
 INSERT OR REPLACE INTO system_settings (key, value, updated_at) VALUES
   ('site_lock_enabled', '1', (unixepoch() * 1000)),
-  ('site_lock_password_hash', 'PxzgSR9ROGGLzDR3+islVRYAd4Iq14tRNXcWe+4Y+f4=', (unixepoch() * 1000)),
-  ('site_lock_password_salt', 'lFhAE3C2YPVTsredrecEkw==', (unixepoch() * 1000)),
+  ('site_lock_password_hash', 'md0eo0Ma9BarAEAlMwsi9WKfkaa5tzTtpP+bL0kLmf8=', (unixepoch() * 1000)),
+  ('site_lock_password_salt', 'dZe43Wvbdy9wQOzvB1hz8g==', (unixepoch() * 1000)),
   ('treasury_balance', '1000000000000', (unixepoch() * 1000)),
   ('next_permanent_id_seq', '1', (unixepoch() * 1000));
 

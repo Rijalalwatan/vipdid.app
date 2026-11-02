@@ -56,7 +56,7 @@ function randomCode() { const values = new Uint32Array(1); let value = 0; do { c
 async function digest(value: string) { return new Uint8Array(await crypto.subtle.digest('SHA-256', encoder.encode(value))); }
 async function hashed(value: string) { return toBase64(await digest(value)); }
 function equal(left: Uint8Array, right: Uint8Array) { if (left.byteLength !== right.byteLength) return false; let comparison = 0; for (let index = 0; index < left.length; index += 1) comparison |= left[index] ^ right[index]; return comparison === 0; }
-async function deriveSecretHash(value: string, salt: string) { const key = await crypto.subtle.importKey('raw', encoder.encode(value), 'PBKDF2', false, ['deriveBits']); const bits = await crypto.subtle.deriveBits({ name: 'PBKDF2', hash: 'SHA-256', salt: fromBase64(salt), iterations: 210000 }, key, 256); return new Uint8Array(bits); }
+async function deriveSecretHash(value: string, salt: string) { const key = await crypto.subtle.importKey('raw', encoder.encode(value), 'PBKDF2', false, ['deriveBits']); const bits = await crypto.subtle.deriveBits({ name: 'PBKDF2', hash: 'SHA-256', salt: fromBase64(salt), iterations: 100000 }, key, 256); return new Uint8Array(bits); }
 async function sign(value: string, secret: string) { const key = await crypto.subtle.importKey('raw', encoder.encode(secret), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']); return toBase64Url(new Uint8Array(await crypto.subtle.sign('HMAC', key, encoder.encode(value)))); }
 function localeOf(value: unknown): Locale { return value === 'en' ? 'en' : 'ar'; }
 function emailOf(value: unknown) { const email = typeof value === 'string' ? value.trim().toLowerCase() : ''; return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) && email.length <= 254 ? email : null; }

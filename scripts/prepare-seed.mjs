@@ -4,7 +4,7 @@ import path from 'node:path';
 
 const password = 'VIP2026';
 const salt = randomBytes(16);
-const hash = pbkdf2Sync(password, salt, 210000, 32, 'sha256');
+const hash = pbkdf2Sync(password, salt, 100000, 32, 'sha256');
 const now = "(unixepoch() * 1000)";
 const file = path.resolve(import.meta.dirname, '..', 'database', 'seed.sql');
 const sql = `INSERT OR REPLACE INTO system_settings (key, value, updated_at) VALUES
