@@ -1,1 +1,1 @@
-{"routes":[{"path":"/","title":"VIP Digital ID"},{"path":"/features","title":"Platform Features"},{"path":"/privacy","title":"Privacy"},{"path":"/terms","title":"Terms"}]}
+{"routes":[{"path":"/","title":"VIP Digital ID"},{"path":"/dashboard","title":"Identity Dashboard"},{"path":"/features","title":"Platform Features"},{"path":"/privacy","title":"Privacy"},{"path":"/terms","title":"Terms"},{"path":"/:slug","title":"Professional Identity"}]}

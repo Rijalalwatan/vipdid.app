@@ -67,19 +67,20 @@ export function PlatformMasthead({ eyebrow, title, description, compact = false 
   );
 }
 
-type ProfileCoverProps = { eyebrow: string; title: string; description: string };
+type ProfileCoverProps = { eyebrow: string; title: string; description: string; coverSrc?: string; imageSrc?: string; imageAlt?: string };
 
-export function ProfileCover({ eyebrow, title, description }: ProfileCoverProps) {
+export function ProfileCover({ eyebrow, title, description, coverSrc = '/brand/cover.webp', imageSrc = platformConfig.assets.logo, imageAlt = '' }: ProfileCoverProps) {
   return (
     <section className="profile-cover" aria-labelledby="profile-cover-title">
+      <img className="profile-cover-image" src={coverSrc} alt="" />
       <div className="profile-cover-content">
         <p className="eyebrow">{eyebrow}</p>
         <h1 id="profile-cover-title">{title}</h1>
         <p>{description}</p>
       </div>
-      <div className="profile-cover-emblem" aria-hidden="true">
-        <span className="profile-emblem-ring" />
-        <img src={platformConfig.assets.logo} alt="" />
+      <div className="profile-cover-emblem">
+        <span className="profile-emblem-ring" aria-hidden="true" />
+        <img src={imageSrc} alt={imageAlt} />
       </div>
     </section>
   );

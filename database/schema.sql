@@ -164,8 +164,10 @@ CREATE TABLE IF NOT EXISTS auth_sessions (
 
 CREATE INDEX IF NOT EXISTS idx_users_tenant_status ON users(tenant_id, status);
 CREATE INDEX IF NOT EXISTS idx_profiles_tenant_slug ON profiles(tenant_id, slug);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_profiles_slug_global ON profiles(slug);
 CREATE INDEX IF NOT EXISTS idx_publish_requests_tenant_status ON publish_requests(tenant_id, status, submitted_at);
 CREATE INDEX IF NOT EXISTS idx_media_assets_profile ON media_assets(profile_id, category);
+CREATE INDEX IF NOT EXISTS idx_media_assets_user_category ON media_assets(user_id, category, created_at);
 CREATE INDEX IF NOT EXISTS idx_ledger_entries_created_at ON ledger_entries(created_at);
 CREATE INDEX IF NOT EXISTS idx_audit_logs_tenant_created_at ON audit_logs(tenant_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_auth_challenges_email_purpose ON auth_challenges(email, purpose, expires_at);

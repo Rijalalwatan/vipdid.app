@@ -13,6 +13,10 @@ type SearchRow = { slug: string; published_json: string | null; featured_until: 
 type PublicResult = { slug: string; name: string; title: string; summary: string; featured: boolean };
 type UserRow = { id: string; permanent_id: string; name: string; role: 'user' | 'moderator' | 'adheed' | 'super_admin'; wallet_balance: number; email_verified_at: number | null; status: string; pin_hash: string | null; pin_salt: string | null; failed_login_attempts: number; locked_until: number | null };
 type ChallengeRow = { id: string; user_id: string | null; code_hash: string; code_salt: string; expires_at: number; attempts: number; max_attempts: number };
+type MediaCategory = 'avatar' | 'cover' | 'skill' | 'portfolio';
+type ProfileRow = { id: string; user_id: string; tenant_id: string; slug: string; draft_json: string; is_published: number; storage_used_bytes: number; images_count: number; updated_at: number; created_at: number };
+type MediaRow = { id: string; category: MediaCategory; r2_key: string; size_bytes: number; created_at: number };
+type ContactRow = { email: string; phone: string | null; whatsapp: string | null; tenant_id: string };
 declare const __STATIC_ASSETS__: Record<string, StaticAsset>;
 
 const STATIC_ASSETS: Record<string, StaticAsset> = __STATIC_ASSETS__;
@@ -22,6 +26,9 @@ const OWNER_EMAIL = 'rijalalwatan.com@gmail.com';
 const SESSION_SECONDS = 60 * 60 * 24;
 const DEVICE_SECONDS = 60 * 60 * 24 * 30;
 const CHALLENGE_MS = 10 * 60 * 1000;
+const IMAGE_STORAGE_LIMIT = 5 * 1024 * 1024;
+const IMAGE_MAXIMUMS: Record<MediaCategory, number> = { avatar: 1, cover: 1, skill: 3, portfolio: 4 };
+const RESERVED_SLUGS = new Set(['api', 'assets', 'brand', 'dashboard', 'features', 'favicon.ico', 'privacy', 'sw.js', 'terms', 'manus-routes.json']);
 const securityHeaders = {
   'strict-transport-security': 'max-age=31536000; includeSubDomains; preload',
   'referrer-policy': 'strict-origin-when-cross-origin',
@@ -104,9 +111,148 @@ async function ownerStart(request: Request, env: Env) { if (!sameOrigin(request)
 
 async function ownerVerify(request: Request, env: Env) { if (!sameOrigin(request)) return responseJson({ ok: false, error: 'invalid_request' }, 403); const input = record(await request.json().catch(() => ({}))); const email = emailOf(input.email); const code = pinOf(input.code); const pin = pinOf(input.pin); if (!email || email !== OWNER_EMAIL || !code || !pin) return responseJson({ ok: false, error: 'invalid_input' }, 400); const checked = await consumeChallenge(env, email, code, 'owner_setup'); if (!checked.ok) return responseJson({ ok: false, error: checked.error }, 401); const user = await env.DB.prepare(`SELECT id, permanent_id, name, role, wallet_balance, email_verified_at, status, pin_hash, pin_salt, failed_login_attempts, locked_until FROM users WHERE id = ? AND email = ? AND role = 'super_admin'`).bind(checked.challenge.user_id, email).first<UserRow>(); if (!user) return responseJson({ ok: false, error: 'invalid_login' }, 401); const now = Date.now(); const salt = toBase64(crypto.getRandomValues(new Uint8Array(16))); const pinHash = toBase64(await deriveSecretHash(pin, salt)); await env.DB.batch([env.DB.prepare('UPDATE auth_challenges SET consumed_at = ? WHERE id = ?').bind(now, checked.challenge.id), env.DB.prepare('UPDATE users SET pin_hash = ?, pin_salt = ?, pin_set_at = ?, email_verified_at = ?, status = ? WHERE id = ?').bind(pinHash, salt, now, now, 'active', user.id)]); const issued = await issueSession(env, { ...user, pin_hash: pinHash, pin_salt: salt, email_verified_at: now, status: 'active' }, input.trustDevice !== false); return withCookies(responseJson({ ok: true, state: 'authenticated', user: issued.user }), issued.cookies); }
 
+
+function slugOf(value: unknown) { const slug = typeof value === 'string' ? value.trim().toLowerCase() : ''; return /^[a-z0-9](?:[a-z0-9-]{1,30}[a-z0-9])$/.test(slug) && !RESERVED_SLUGS.has(slug) ? slug : null; }
+function textOf(value: unknown, maximum = 4000) { return typeof value === 'string' ? value.trim().slice(0, maximum) : ''; }
+function profileDraft(value: unknown, fallbackName: string) {
+  const input = record(value);
+  return {
+    displayName: textOf(input.displayName, 120) || fallbackName,
+    title: textOf(input.title, 180), bio: textOf(input.bio), experiences: textOf(input.experiences), education: textOf(input.education), courses: textOf(input.courses),
+    skills: textOf(input.skills), languages: textOf(input.languages), achievements: textOf(input.achievements), awards: textOf(input.awards),
+    portfolio: textOf(input.portfolio), services: textOf(input.services), socialLinks: textOf(input.socialLinks), videoUrl: textOf(input.videoUrl, 500), externalLinks: textOf(input.externalLinks),
+    showWhatsapp: input.showWhatsapp === true, showPhone: input.showPhone === true, showEmail: input.showEmail === true
+  };
+}
+function readDraft(value: string | null | undefined, fallbackName: string) { try { return profileDraft(value ? JSON.parse(value) : {}, fallbackName); } catch { return profileDraft({}, fallbackName); } }
+function mediaView(row: MediaRow) { return { id: row.id, category: row.category, sizeBytes: row.size_bytes, url: `/api/media/${encodeURIComponent(row.id)}` }; }
+function isCategory(value: unknown): value is MediaCategory { return value === 'avatar' || value === 'cover' || value === 'skill' || value === 'portfolio'; }
+function isWebP(bytes: Uint8Array) { return bytes.byteLength >= 12 && decoder.decode(bytes.slice(0, 4)) === 'RIFF' && decoder.decode(bytes.slice(8, 12)) === 'WEBP'; }
+
+async function accountProfileData(env: Env, user: UserRow) {
+  const [profile, contact] = await Promise.all([
+    env.DB.prepare('SELECT id, user_id, tenant_id, slug, draft_json, is_published, storage_used_bytes, images_count, updated_at, created_at FROM profiles WHERE user_id = ?').bind(user.id).first<ProfileRow>(),
+    env.DB.prepare('SELECT email, phone, whatsapp, tenant_id FROM users WHERE id = ?').bind(user.id).first<ContactRow>()
+  ]);
+  const media = profile ? (await env.DB.prepare('SELECT id, category, r2_key, size_bytes, created_at FROM media_assets WHERE profile_id = ? ORDER BY created_at ASC').bind(profile.id).all<MediaRow>()).results ?? [] : [];
+  const storage = media.reduce((total, item) => total + item.size_bytes, 0);
+  return { slug: profile?.slug ?? '', data: readDraft(profile?.draft_json, user.name), media: media.map(mediaView), imageCount: media.length, storageUsedBytes: storage, exists: Boolean(profile), contact: { email: contact?.email ?? '', phone: contact?.phone ?? '', whatsapp: contact?.whatsapp ?? '' } };
+}
+
+async function accountProfile(request: Request, env: Env) { const user = await authUser(request, env); if (!user) return responseJson({ ok: false, error: 'unauthorized' }, 401); return responseJson({ ok: true, profile: await accountProfileData(env, user) }); }
+
+async function saveAccountProfile(request: Request, env: Env) {
+  if (!sameOrigin(request)) return responseJson({ ok: false, error: 'invalid_request' }, 403);
+  const user = await authUser(request, env); if (!user) return responseJson({ ok: false, error: 'unauthorized' }, 401);
+  const input = record(await request.json().catch(() => ({}))); const slug = slugOf(input.slug);
+  if (!slug) return responseJson({ ok: false, error: 'invalid_slug' }, 400);
+  const existing = await env.DB.prepare('SELECT id, user_id, tenant_id, slug, draft_json, is_published, storage_used_bytes, images_count, updated_at, created_at FROM profiles WHERE user_id = ?').bind(user.id).first<ProfileRow>();
+  const clash = await env.DB.prepare('SELECT id FROM profiles WHERE slug = ? AND user_id != ?').bind(slug, user.id).first<{ id: string }>();
+  if (clash) return responseJson({ ok: false, error: RESERVED_SLUGS.has(slug) ? 'reserved_slug' : 'slug_taken' }, 409);
+  const data = JSON.stringify(profileDraft(input.data, user.name)); const now = Date.now();
+  try {
+    if (existing) await env.DB.prepare('UPDATE profiles SET slug = ?, draft_json = ?, updated_at = ? WHERE id = ? AND user_id = ?').bind(slug, data, now, existing.id, user.id).run();
+    else {
+      const owner = await env.DB.prepare('SELECT tenant_id FROM users WHERE id = ?').bind(user.id).first<{ tenant_id: string }>();
+      if (!owner) return responseJson({ ok: false, error: 'unauthorized' }, 401);
+      await env.DB.prepare('INSERT INTO profiles (id, user_id, tenant_id, slug, is_published, published_version_id, draft_json, published_json, allow_search_indexing, active_days_balance, featured_until, storage_used_bytes, images_count, updated_at, created_at) VALUES (?, ?, ?, ?, 0, NULL, ?, NULL, 1, 0, NULL, 0, 0, ?, ?)').bind(`profile_${crypto.randomUUID()}`, user.id, owner.tenant_id, slug, data, now, now).run();
+    }
+  } catch { return responseJson({ ok: false, error: 'slug_taken' }, 409); }
+  await env.DB.prepare('INSERT INTO audit_logs (id, tenant_id, actor_id, action, target_type, target_id, details_json, ip_hash, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)').bind(crypto.randomUUID(), 'tenant_main', user.id, 'profile_draft_saved', 'profile', existing?.id ?? user.id, JSON.stringify({ slug }), toBase64(await digest(request.headers.get('CF-Connecting-IP') ?? 'unknown')), now).run();
+  return responseJson({ ok: true, profile: await accountProfileData(env, user) });
+}
+
+async function uploadProfileMedia(request: Request, env: Env) {
+  if (!sameOrigin(request)) return responseJson({ ok: false, error: 'invalid_request' }, 403);
+  const user = await authUser(request, env); if (!user) return responseJson({ ok: false, error: 'unauthorized' }, 401);
+  const form = await request.formData().catch(() => null); const category = form?.get('category'); const file = form?.get('file');
+  if (!isCategory(category) || !(file instanceof File) || file.type !== 'image/webp') return responseJson({ ok: false, error: 'invalid_image' }, 400);
+  const profile = await env.DB.prepare('SELECT id, user_id, tenant_id, slug, draft_json, is_published, storage_used_bytes, images_count, updated_at, created_at FROM profiles WHERE user_id = ?').bind(user.id).first<ProfileRow>();
+  if (!profile) return responseJson({ ok: false, error: 'profile_required' }, 400);
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  if (!isWebP(bytes) || bytes.byteLength < 64 || bytes.byteLength > 2 * 1024 * 1024) return responseJson({ ok: false, error: 'invalid_image' }, 400);
+  const categoryRows = (await env.DB.prepare('SELECT id, category, r2_key, size_bytes, created_at FROM media_assets WHERE profile_id = ? AND category = ? ORDER BY created_at ASC').bind(profile.id, category).all<MediaRow>()).results ?? [];
+  const allRows = (await env.DB.prepare('SELECT id, category, r2_key, size_bytes, created_at FROM media_assets WHERE profile_id = ?').bind(profile.id).all<MediaRow>()).results ?? [];
+  const replacements = category === 'avatar' || category === 'cover' ? categoryRows : [];
+  if (!replacements.length && categoryRows.length >= IMAGE_MAXIMUMS[category]) return responseJson({ ok: false, error: 'image_limit' }, 400);
+  const used = allRows.reduce((total, item) => total + item.size_bytes, 0) - replacements.reduce((total, item) => total + item.size_bytes, 0);
+  if (used + bytes.byteLength > IMAGE_STORAGE_LIMIT || allRows.length - replacements.length + 1 > 9) return responseJson({ ok: false, error: 'storage_limit' }, 400);
+  const id = `media_${crypto.randomUUID()}`; const key = `profiles/${user.id}/${category}/${crypto.randomUUID()}.webp`; const now = Date.now();
+  try {
+    await env.MEDIA.put(key, bytes, { httpMetadata: { contentType: 'image/webp', cacheControl: 'public, max-age=31536000, immutable' }, customMetadata: { userId: user.id, profileId: profile.id, category } });
+    await env.DB.batch([
+      ...replacements.map((item) => env.DB.prepare('DELETE FROM media_assets WHERE id = ? AND profile_id = ?').bind(item.id, profile.id)),
+      env.DB.prepare('INSERT INTO media_assets (id, user_id, profile_id, category, r2_key, size_bytes, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)').bind(id, user.id, profile.id, category, key, bytes.byteLength, now),
+      env.DB.prepare('UPDATE profiles SET storage_used_bytes = ?, images_count = ?, updated_at = ? WHERE id = ?').bind(used + bytes.byteLength, allRows.length - replacements.length + 1, now, profile.id),
+      env.DB.prepare('INSERT INTO audit_logs (id, tenant_id, actor_id, action, target_type, target_id, details_json, ip_hash, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)').bind(crypto.randomUUID(), profile.tenant_id, user.id, 'profile_media_uploaded', 'media', id, JSON.stringify({ category, size: bytes.byteLength }), toBase64(await digest(request.headers.get('CF-Connecting-IP') ?? 'unknown')), now)
+    ]);
+  } catch { await env.MEDIA.delete(key).catch(() => undefined); return responseJson({ ok: false, error: 'invalid_image' }, 400); }
+  await Promise.all(replacements.map((item) => env.MEDIA.delete(item.r2_key).catch(() => undefined)));
+  return responseJson({ ok: true, profile: await accountProfileData(env, user) });
+}
+
+async function deleteProfileMedia(request: Request, env: Env, id: string) {
+  if (!sameOrigin(request)) return responseJson({ ok: false, error: 'invalid_request' }, 403);
+  const user = await authUser(request, env); if (!user) return responseJson({ ok: false, error: 'unauthorized' }, 401);
+  const media = await env.DB.prepare('SELECT m.id, m.category, m.r2_key, m.size_bytes, m.created_at, p.id AS profile_id, p.tenant_id FROM media_assets m JOIN profiles p ON p.id = m.profile_id WHERE m.id = ? AND m.user_id = ?').bind(id, user.id).first<MediaRow & { profile_id: string; tenant_id: string }>();
+  if (!media) return responseJson({ ok: false, error: 'not_found' }, 404);
+  const now = Date.now();
+  await env.DB.batch([
+    env.DB.prepare('DELETE FROM media_assets WHERE id = ? AND user_id = ?').bind(media.id, user.id),
+    env.DB.prepare('UPDATE profiles SET storage_used_bytes = MAX(0, storage_used_bytes - ?), images_count = MAX(0, images_count - 1), updated_at = ? WHERE id = ?').bind(media.size_bytes, now, media.profile_id),
+    env.DB.prepare('INSERT INTO audit_logs (id, tenant_id, actor_id, action, target_type, target_id, details_json, ip_hash, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)').bind(crypto.randomUUID(), media.tenant_id, user.id, 'profile_media_deleted', 'media', media.id, JSON.stringify({ category: media.category }), toBase64(await digest(request.headers.get('CF-Connecting-IP') ?? 'unknown')), now)
+  ]);
+  await env.MEDIA.delete(media.r2_key).catch(() => undefined);
+  return responseJson({ ok: true, profile: await accountProfileData(env, user) });
+}
+
+async function mediaAsset(env: Env, id: string) {
+  const media = await env.DB.prepare('SELECT r2_key FROM media_assets WHERE id = ?').bind(id).first<{ r2_key: string }>();
+  if (!media) return new Response('Not Found', { status: 404, headers: securityHeaders });
+  const object = await env.MEDIA.get(media.r2_key);
+  if (!object) return new Response('Not Found', { status: 404, headers: securityHeaders });
+  return secure(new Response(object.body, { headers: { 'content-type': object.httpMetadata?.contentType ?? 'image/webp', 'content-length': String(object.size), 'cache-control': object.httpMetadata?.cacheControl ?? 'public, max-age=31536000, immutable' } }));
+}
+
+async function publicProfile(env: Env, slug: string) {
+  const profile = await env.DB.prepare('SELECT p.id, p.user_id, p.tenant_id, p.slug, p.draft_json, p.is_published, p.storage_used_bytes, p.images_count, p.updated_at, p.created_at, u.name, u.email, u.phone, u.whatsapp FROM profiles p JOIN users u ON u.id = p.user_id WHERE p.slug = ? AND u.status = ?').bind(slug, 'active').first<ProfileRow & { name: string; email: string; phone: string | null; whatsapp: string | null }>();
+  if (!profile) return responseJson({ ok: false, error: 'not_found' }, 404);
+  const media = (await env.DB.prepare('SELECT id, category, r2_key, size_bytes, created_at FROM media_assets WHERE profile_id = ? ORDER BY created_at ASC').bind(profile.id).all<MediaRow>()).results ?? [];
+  return responseJson({ ok: true, profile: { slug: profile.slug, data: readDraft(profile.draft_json, profile.name), media: media.map(mediaView), contact: { email: profile.email, phone: profile.phone ?? '', whatsapp: profile.whatsapp ?? '' } } });
+}
+
 async function me(request: Request, env: Env) { const user = await authUser(request, env); return responseJson({ ok: true, authenticated: Boolean(user), user: user ? userView(user) : null }); }
 async function logout(request: Request, env: Env) { if (!sameOrigin(request)) return responseJson({ ok: false, error: 'invalid_request' }, 403); const token = cookie(request, 'vipdid_session'); if (token) await env.DB.prepare('UPDATE auth_sessions SET revoked_at = ? WHERE token_hash = ? AND revoked_at IS NULL').bind(Date.now(), await hashed(token)).run(); return withCookies(responseJson({ ok: true }), [clearCookie('vipdid_session'), clearCookie('vipdid_device')]); }
 async function unlock(request: Request, env: Env) { const ip = request.headers.get('CF-Connecting-IP') ?? 'unknown'; const rateKey = `lock:${toBase64Url(await digest(ip)).slice(0, 24)}`; const current = Number(await env.RATE_LIMIT.get(rateKey) ?? '0'); if (current >= 5) return responseJson({ ok: false, reason: 'limited' }, 429); const body = await request.json<{ password?: string }>().catch(() => ({} as { password?: string })); const [enabled, expectedHash, salt] = await Promise.all([setting(env, 'site_lock_enabled'), setting(env, 'site_lock_password_hash'), setting(env, 'site_lock_password_salt')]); if (enabled !== '1') return responseJson({ ok: true, locked: false }); const verified = Boolean(body.password && expectedHash && salt && equal(await deriveSecretHash(body.password, salt), fromBase64(expectedHash))); if (!verified) { await env.RATE_LIMIT.put(rateKey, String(current + 1), { expirationTtl: 900 }); return responseJson({ ok: false, reason: 'invalid' }, 401); } await env.RATE_LIMIT.delete(rateKey); const payload = toBase64Url(encoder.encode(JSON.stringify({ expiresAt: Date.now() + 43200000 }))); const token = `${payload}.${await sign(payload, env.SESSION_SIGNING_KEY)}`; return responseJson({ ok: true, locked: false }, 200, { 'set-cookie': `vipdid_access=${token}; Path=/; Max-Age=43200; HttpOnly; Secure; SameSite=None` }); }
 function staticAsset(pathname: string) { const key = pathname === '/' ? 'index.html' : pathname.slice(1); const asset = STATIC_ASSETS[key]; if (!asset) return null; return new Response(fromBase64(asset.body), { headers: { 'content-type': asset.type, 'cache-control': asset.immutable ? 'public, max-age=31536000, immutable' : 'no-cache', 'x-content-type-options': 'nosniff' } }); }
 
-export default { async fetch(request: Request, env: Env): Promise<Response> { const url = new URL(request.url); if (url.pathname === '/api/health') return responseJson({ ok: true, service: 'vipdid' }); if (url.pathname === '/api/lock/status' && request.method === 'GET') return responseJson({ locked: await locked(request, env) }); if (url.pathname === '/api/lock/unlock' && request.method === 'POST') return unlock(request, env); if (url.pathname === '/api/public/search' && request.method === 'GET') return publicSearch(request, env); if (url.pathname === '/api/auth/me' && request.method === 'GET') return me(request, env); if (url.pathname === '/api/auth/register' && request.method === 'POST') return register(request, env); if (url.pathname === '/api/auth/register/verify' && request.method === 'POST') return verifyRegistration(request, env); if (url.pathname === '/api/auth/login/start' && request.method === 'POST') return loginStart(request, env); if (url.pathname === '/api/auth/login/verify' && request.method === 'POST') return verifyLogin(request, env); if (url.pathname === '/api/auth/owner/start' && request.method === 'POST') return ownerStart(request, env); if (url.pathname === '/api/auth/owner/verify' && request.method === 'POST') return ownerVerify(request, env); if (url.pathname === '/api/auth/logout' && request.method === 'POST') return logout(request, env); const asset = staticAsset(url.pathname) ?? (request.method === 'GET' && ['/', '/features', '/privacy', '/terms'].includes(url.pathname) ? staticAsset('/') : null); if (asset) return secure(asset); return new Response('Not Found', { status: 404, headers: securityHeaders }); } };
+function routeSlug(pathname: string) { const value = decodeURIComponent(pathname.replace(/^\/+|\/+$/g, '')); return slugOf(value); }
+
+export default {
+  async fetch(request: Request, env: Env): Promise<Response> {
+    const url = new URL(request.url);
+    if (url.pathname === '/api/health') return responseJson({ ok: true, service: 'vipdid' });
+    if (url.pathname === '/api/lock/status' && request.method === 'GET') return responseJson({ locked: await locked(request, env) });
+    if (url.pathname === '/api/lock/unlock' && request.method === 'POST') return unlock(request, env);
+    if (url.pathname === '/api/public/search' && request.method === 'GET') return publicSearch(request, env);
+    if (url.pathname.startsWith('/api/public/profile/') && request.method === 'GET') { const slug = slugOf(decodeURIComponent(url.pathname.slice('/api/public/profile/'.length))); return slug ? publicProfile(env, slug) : responseJson({ ok: false, error: 'not_found' }, 404); }
+    if (url.pathname.startsWith('/api/media/') && request.method === 'GET') { const id = decodeURIComponent(url.pathname.slice('/api/media/'.length)); return /^media_[a-z0-9-]{36}$/.test(id) ? mediaAsset(env, id) : new Response('Not Found', { status: 404, headers: securityHeaders }); }
+    if (url.pathname === '/api/auth/me' && request.method === 'GET') return me(request, env);
+    if (url.pathname === '/api/auth/register' && request.method === 'POST') return register(request, env);
+    if (url.pathname === '/api/auth/register/verify' && request.method === 'POST') return verifyRegistration(request, env);
+    if (url.pathname === '/api/auth/login/start' && request.method === 'POST') return loginStart(request, env);
+    if (url.pathname === '/api/auth/login/verify' && request.method === 'POST') return verifyLogin(request, env);
+    if (url.pathname === '/api/auth/owner/start' && request.method === 'POST') return ownerStart(request, env);
+    if (url.pathname === '/api/auth/owner/verify' && request.method === 'POST') return ownerVerify(request, env);
+    if (url.pathname === '/api/auth/logout' && request.method === 'POST') return logout(request, env);
+    if (url.pathname === '/api/account/profile' && request.method === 'GET') return accountProfile(request, env);
+    if (url.pathname === '/api/account/profile' && request.method === 'PUT') return saveAccountProfile(request, env);
+    if (url.pathname === '/api/account/media' && request.method === 'POST') return uploadProfileMedia(request, env);
+    if (url.pathname.startsWith('/api/account/media/') && request.method === 'DELETE') return deleteProfileMedia(request, env, decodeURIComponent(url.pathname.slice('/api/account/media/'.length)));
+    const asset = staticAsset(url.pathname);
+    if (asset) return secure(asset);
+    const profile = request.method === 'GET' ? routeSlug(url.pathname) : null;
+    if (request.method === 'GET' && (['/', '/dashboard', '/features', '/privacy', '/terms'].includes(url.pathname) || profile)) return secure(staticAsset('/')!);
+    return new Response('Not Found', { status: 404, headers: securityHeaders });
+  }
+};
