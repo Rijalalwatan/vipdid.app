@@ -1,3 +1,5 @@
+import { DAY_REDEMPTION_COST, FIRST_PUBLICATION_REWARD, REGISTRATION_REWARD, TREASURY_ACCOUNT, activeUserById, activeUserByPermanentId, awardFromTreasury, debitToTreasury, grantCategoryOf, idempotencyOf, permanentIdOf, pointAmountOf, redeemDays, transferPoints } from './midpoint';
+
 interface Env {
   DB: D1Database;
   MEDIA: R2Bucket;
@@ -20,6 +22,8 @@ type ContactRow = { email: string; phone: string | null; whatsapp: string | null
 type PublicationRow = { id: string; status: 'pending' | 'approved' | 'changes_requested' | 'rejected'; review_note: string | null; submitted_at: number; reviewed_at: number | null; submitted_payload_json: string; submission_locale: Locale };
 type ReviewRequestRow = PublicationRow & { slug: string; owner_name: string; owner_email: string };
 type NotificationRow = { id: string; kind: 'publication_approved' | 'publication_changes_requested' | 'publication_rejected'; title: string; message: string; created_at: number };
+type WalletLedgerRow = { id: string; from_account: string; to_account: string; amount: number; tx_type: string; created_at: number };
+type GrantRequestRow = { id: string; status: 'pending' | 'approved' | 'rejected'; request_reason: string; grant_category: 'seasonal' | 'exceptional' | 'activity' | null; awarded_amount: number | null; reviewer_reason: string | null; requested_at: number; user_name?: string; permanent_id?: string };
 declare const __STATIC_ASSETS__: Record<string, StaticAsset>;
 
 const STATIC_ASSETS: Record<string, StaticAsset> = __STATIC_ASSETS__;
@@ -92,17 +96,54 @@ async function issueSession(env: Env, user: UserRow, trustDevice: boolean) { con
  await env.DB.prepare('INSERT INTO auth_sessions (id, user_id, token_hash, trusted_device_id, expires_at, last_seen_at, revoked_at, created_at) VALUES (?, ?, ?, ?, ?, ?, NULL, ?)').bind(sessionId, user.id, await hashed(sessionToken), deviceId, now + SESSION_SECONDS * 1000, now, now).run(); await env.DB.prepare('UPDATE users SET last_login_at = ?, failed_login_attempts = 0, locked_until = NULL WHERE id = ?').bind(now, user.id).run(); return { user: userView(user), cookies }; }
 async function authUser(request: Request, env: Env) { const token = cookie(request, 'vipdid_session'); if (!token) return null; const user = await env.DB.prepare(`SELECT u.id, u.permanent_id, u.name, u.role, u.wallet_balance, u.email_verified_at, u.status, u.pin_hash, u.pin_salt, u.failed_login_attempts, u.locked_until FROM auth_sessions s JOIN users u ON u.id = s.user_id WHERE s.token_hash = ? AND s.expires_at > ? AND s.revoked_at IS NULL AND u.status = 'active'`).bind(await hashed(token), Date.now()).first<UserRow>(); if (user) await env.DB.prepare('UPDATE auth_sessions SET last_seen_at = ? WHERE token_hash = ?').bind(Date.now(), await hashed(token)).run(); return user; }
 
-async function register(request: Request, env: Env) { if (!sameOrigin(request)) return responseJson({ ok: false, error: 'invalid_request' }, 403); const body = await request.json().catch(() => ({})); const input = record(body); const locale = localeOf(input.locale); const email = emailOf(input.email); const name = typeof input.name === 'string' ? input.name.trim().slice(0, 120) : ''; const phone = phoneOf(input.phone); const whatsapp = phoneOf(input.whatsapp); if (!email || !name || phone === null || whatsapp === null || input.termsAccepted !== true || input.privacyAccepted !== true || input.eligibilityAccepted !== true) return responseJson({ ok: false, error: 'invalid_input' }, 400); if (await limited(env, request, 'register', email, 4, 900)) return responseJson({ ok: false, error: 'limited' }, 429); if (!(await verifyTurnstile(request, env, input.turnstileToken))) return responseJson({ ok: false, error: 'human_failed' }, 400); const now = Date.now(); let user = await env.DB.prepare('SELECT id, status FROM users WHERE email = ?').bind(email).first<{ id: string; status: string }>(); if (user?.status === 'active') return responseJson({ ok: false, error: 'email_in_use' }, 409); if (!user) { const id = `user_${crypto.randomUUID()}`; await env.DB.prepare('INSERT INTO users (id, permanent_id, tenant_id, name, email, phone, whatsapp, pin_hash, pin_salt, role, is_managed, wallet_balance, status, failed_login_attempts, terms_accepted_at, privacy_accepted_at, eligibility_acknowledged_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, 0, 0, ?, 0, ?, ?, ?, ?)').bind(id, `pending_${crypto.randomUUID()}`, 'tenant_main', name, email, phone || null, whatsapp || null, 'user', 'pending_verification', now, now, now, now).run(); user = { id, status: 'pending_verification' }; } else { await env.DB.prepare('UPDATE users SET name = ?, phone = ?, whatsapp = ?, terms_accepted_at = ?, privacy_accepted_at = ?, eligibility_acknowledged_at = ? WHERE id = ?').bind(name, phone || null, whatsapp || null, now, now, now, user.id).run(); }
- const code = await createChallenge(env, request, email, user.id, 'registration', locale); if (!(await sendCode(env, email, code, locale))) return responseJson({ ok: false, error: 'delivery_failed' }, 503); await env.DB.prepare('INSERT INTO audit_logs (id, tenant_id, actor_id, action, target_type, target_id, details_json, ip_hash, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)').bind(crypto.randomUUID(), 'tenant_main', user.id, 'registration_code_sent', 'user', user.id, JSON.stringify({ locale }), toBase64(await digest(request.headers.get('CF-Connecting-IP') ?? 'unknown')), now).run(); return responseJson({ ok: true, state: 'verification_required' }, 202); }
+async function register(request: Request, env: Env) {
+  if (!sameOrigin(request)) return responseJson({ ok: false, error: 'invalid_request' }, 403);
+  const input = record(await request.json().catch(() => ({}))); const locale = localeOf(input.locale); const email = emailOf(input.email); const name = typeof input.name === 'string' ? input.name.trim().slice(0, 120) : ''; const phone = phoneOf(input.phone); const whatsapp = phoneOf(input.whatsapp);
+  const rawReferral = typeof input.referralPermanentId === 'string' ? input.referralPermanentId.trim() : ''; const referral = rawReferral ? permanentIdOf(rawReferral) : null;
+  if (!email || !name || phone === null || whatsapp === null || (rawReferral && !referral) || input.termsAccepted !== true || input.privacyAccepted !== true || input.eligibilityAccepted !== true) return responseJson({ ok: false, error: rawReferral && !referral ? 'invalid_referral' : 'invalid_input' }, 400);
+  if (await limited(env, request, 'register', email, 4, 900)) return responseJson({ ok: false, error: 'limited' }, 429);
+  if (!(await verifyTurnstile(request, env, input.turnstileToken))) return responseJson({ ok: false, error: 'human_failed' }, 400);
+  if (referral) { const referrer = await env.DB.prepare("SELECT id, email FROM users WHERE permanent_id = ? AND status = 'active'").bind(referral).first<{ id: string; email: string }>(); if (!referrer || referrer.email.toLowerCase() === email) return responseJson({ ok: false, error: 'invalid_referral' }, 400); }
+  const now = Date.now(); let user = await env.DB.prepare('SELECT id, status, referred_by_permanent_id FROM users WHERE email = ?').bind(email).first<{ id: string; status: string; referred_by_permanent_id: string | null }>();
+  if (user?.status === 'active') return responseJson({ ok: false, error: 'email_in_use' }, 409);
+  if (!user) {
+    const id = `user_${crypto.randomUUID()}`;
+    await env.DB.prepare('INSERT INTO users (id, permanent_id, tenant_id, name, email, phone, whatsapp, pin_hash, pin_salt, role, is_managed, referred_by_permanent_id, wallet_balance, status, failed_login_attempts, terms_accepted_at, privacy_accepted_at, eligibility_acknowledged_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, 0, ?, 0, ?, 0, ?, ?, ?, ?)').bind(id, `pending_${crypto.randomUUID()}`, 'tenant_main', name, email, phone || null, whatsapp || null, 'user', referral, 'pending_verification', now, now, now, now).run();
+    user = { id, status: 'pending_verification', referred_by_permanent_id: referral };
+  } else {
+    if (referral && user.referred_by_permanent_id && user.referred_by_permanent_id !== referral) return responseJson({ ok: false, error: 'referral_locked' }, 409);
+    await env.DB.prepare('UPDATE users SET name = ?, phone = ?, whatsapp = ?, referred_by_permanent_id = COALESCE(referred_by_permanent_id, ?), terms_accepted_at = ?, privacy_accepted_at = ?, eligibility_acknowledged_at = ? WHERE id = ?').bind(name, phone || null, whatsapp || null, referral, now, now, now, user.id).run();
+  }
+  const code = await createChallenge(env, request, email, user.id, 'registration', locale); if (!(await sendCode(env, email, code, locale))) return responseJson({ ok: false, error: 'delivery_failed' }, 503);
+  await env.DB.prepare('INSERT INTO audit_logs (id, tenant_id, actor_id, action, target_type, target_id, details_json, ip_hash, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)').bind(crypto.randomUUID(), 'tenant_main', user.id, 'registration_code_sent', 'user', user.id, JSON.stringify({ locale, referral }), toBase64(await digest(request.headers.get('CF-Connecting-IP') ?? 'unknown')), now).run();
+  return responseJson({ ok: true, state: 'verification_required' }, 202);
+}
 
-async function verifyRegistration(request: Request, env: Env) { if (!sameOrigin(request)) return responseJson({ ok: false, error: 'invalid_request' }, 403); const input = record(await request.json().catch(() => ({}))); const email = emailOf(input.email); const code = pinOf(input.code); const pin = pinOf(input.pin); if (!email || !code || !pin) return responseJson({ ok: false, error: 'invalid_input' }, 400); const checked = await consumeChallenge(env, email, code, 'registration'); if (!checked.ok) return responseJson({ ok: false, error: checked.error }, 401); const user = await env.DB.prepare(`SELECT id, permanent_id, name, role, wallet_balance, email_verified_at, status, pin_hash, pin_salt, failed_login_attempts, locked_until FROM users WHERE id = ? AND email = ? AND status = 'pending_verification'`).bind(checked.challenge.user_id, email).first<UserRow>(); if (!user) return responseJson({ ok: false, error: 'invalid_request' }, 400); const sequence = Math.max(1, Number(await setting(env, 'next_permanent_id_seq') ?? '1')); const permanentId = `C${sequence + 1}`; const salt = toBase64(crypto.getRandomValues(new Uint8Array(16))); const pinHash = toBase64(await deriveSecretHash(pin, salt)); const now = Date.now(); await env.DB.batch([
-  env.DB.prepare('UPDATE auth_challenges SET consumed_at = ? WHERE id = ? AND consumed_at IS NULL').bind(now, checked.challenge.id),
-  env.DB.prepare('UPDATE users SET permanent_id = ?, pin_hash = ?, pin_salt = ?, pin_set_at = ?, email_verified_at = ?, status = ?, wallet_balance = wallet_balance + 100 WHERE id = ?').bind(permanentId, pinHash, salt, now, now, 'active', user.id),
-  env.DB.prepare('UPDATE system_settings SET value = ?, updated_at = ? WHERE key = ?').bind(String(sequence + 1), now, 'next_permanent_id_seq'),
-  env.DB.prepare('INSERT INTO ledger_entries (id, idempotency_key, from_account, to_account, amount, tx_type, metadata_json, actor_id, created_at) VALUES (?, ?, ?, ?, 100, ?, ?, ?, ?)').bind(crypto.randomUUID(), `registration-bonus:${user.id}`, 'treasury', user.id, 'registration_verification_bonus', JSON.stringify({ permanentId }), user.id, now),
-  env.DB.prepare('INSERT INTO audit_logs (id, tenant_id, actor_id, action, target_type, target_id, details_json, ip_hash, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)').bind(crypto.randomUUID(), 'tenant_main', user.id, 'registration_verified', 'user', user.id, JSON.stringify({ permanentId }), toBase64(await digest(request.headers.get('CF-Connecting-IP') ?? 'unknown')), now)
- ]);
- const active = { ...user, permanent_id: permanentId, wallet_balance: user.wallet_balance + 100, email_verified_at: now, status: 'active', pin_hash: pinHash, pin_salt: salt }; const issued = await issueSession(env, active, input.trustDevice !== false); return withCookies(responseJson({ ok: true, user: issued.user }), issued.cookies); }
+async function verifyRegistration(request: Request, env: Env) {
+  if (!sameOrigin(request)) return responseJson({ ok: false, error: 'invalid_request' }, 403);
+  const input = record(await request.json().catch(() => ({}))); const email = emailOf(input.email); const code = pinOf(input.code); const pin = pinOf(input.pin);
+  if (!email || !code || !pin) return responseJson({ ok: false, error: 'invalid_input' }, 400);
+  const checked = await consumeChallenge(env, email, code, 'registration'); if (!checked.ok) return responseJson({ ok: false, error: checked.error }, 401);
+  const user = await env.DB.prepare("SELECT id, permanent_id, name, role, wallet_balance, email_verified_at, status, pin_hash, pin_salt, failed_login_attempts, locked_until, referred_by_permanent_id FROM users WHERE id = ? AND email = ? AND status = 'pending_verification'").bind(checked.challenge.user_id, email).first<UserRow & { referred_by_permanent_id: string | null }>();
+  if (!user) return responseJson({ ok: false, error: 'invalid_request' }, 400);
+  const sequence = Math.max(1, Number(await setting(env, 'next_permanent_id_seq') ?? '1')); const permanentId = `C${sequence + 1}`; const salt = toBase64(crypto.getRandomValues(new Uint8Array(16))); const pinHash = toBase64(await deriveSecretHash(pin, salt)); const now = Date.now();
+  try {
+    await env.DB.batch([
+      env.DB.prepare('UPDATE auth_challenges SET consumed_at = ? WHERE id = ? AND consumed_at IS NULL').bind(now, checked.challenge.id),
+      env.DB.prepare("UPDATE users SET permanent_id = ?, pin_hash = ?, pin_salt = ?, pin_set_at = ?, email_verified_at = ?, status = ? WHERE id = ? AND status = 'pending_verification'").bind(permanentId, pinHash, salt, now, now, 'active', user.id),
+      env.DB.prepare('UPDATE system_settings SET value = ?, updated_at = ? WHERE key = ?').bind(String(sequence + 1), now, 'next_permanent_id_seq'),
+      env.DB.prepare('INSERT INTO audit_logs (id, tenant_id, actor_id, action, target_type, target_id, details_json, ip_hash, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)').bind(crypto.randomUUID(), 'tenant_main', user.id, 'registration_verified', 'user', user.id, JSON.stringify({ permanentId }), toBase64(await digest(request.headers.get('CF-Connecting-IP') ?? 'unknown')), now)
+    ]);
+  } catch { return responseJson({ ok: false, error: 'verification_failed' }, 409); }
+  const registration = await awardFromTreasury(env, user.id, REGISTRATION_REWARD, 'registration_verification_bonus', `registration-bonus:${user.id}`, user.id, { permanentId });
+  if (!registration.ok) return responseJson({ ok: false, error: registration.error }, 503);
+  if (user.referred_by_permanent_id) {
+    const referrer = await activeUserByPermanentId(env, user.referred_by_permanent_id);
+    if (referrer && referrer.id !== user.id) await awardFromTreasury(env, referrer.id, REGISTRATION_REWARD, 'referral_registration_bonus', `referral-registration:${user.id}`, user.id, { referredUserId: user.id });
+  }
+  const active = { ...user, permanent_id: permanentId, wallet_balance: user.wallet_balance + REGISTRATION_REWARD, email_verified_at: now, status: 'active', pin_hash: pinHash, pin_salt: salt };
+  const issued = await issueSession(env, active, input.trustDevice !== false); return withCookies(responseJson({ ok: true, user: issued.user }), issued.cookies);
+}
 
 async function loginStart(request: Request, env: Env) { if (!sameOrigin(request)) return responseJson({ ok: false, error: 'invalid_request' }, 403); const input = record(await request.json().catch(() => ({}))); const email = emailOf(input.email); const pin = pinOf(input.pin); const locale = localeOf(input.locale); if (!email || !pin) return responseJson({ ok: false, error: 'invalid_login' }, 400); if (await limited(env, request, 'login', email, 8, 900)) return responseJson({ ok: false, error: 'limited' }, 429); const user = await env.DB.prepare(`SELECT id, permanent_id, name, role, wallet_balance, email_verified_at, status, pin_hash, pin_salt, failed_login_attempts, locked_until FROM users WHERE email = ?`).bind(email).first<UserRow>(); const now = Date.now(); if (!user || user.status !== 'active') return responseJson({ ok: false, error: 'invalid_login' }, 401); if (user.locked_until && user.locked_until > now) return responseJson({ ok: false, error: 'account_locked' }, 429); if (!user.pin_hash || !user.pin_salt) return responseJson({ ok: false, error: 'pin_not_set' }, 401); if (!equal(await deriveSecretHash(pin, user.pin_salt), fromBase64(user.pin_hash))) { const attempts = user.failed_login_attempts + 1; const lockedUntil = attempts >= 5 ? now + 15 * 60 * 1000 : null; await env.DB.prepare('UPDATE users SET failed_login_attempts = ?, locked_until = ? WHERE id = ?').bind(attempts, lockedUntil, user.id).run(); return responseJson({ ok: false, error: lockedUntil ? 'account_locked' : 'invalid_login' }, 401); }
  await clearLimit(env, request, 'login', email); const device = await activeDevice(request, env, user.id); if (device) { const issued = await issueSession(env, user, false); return withCookies(responseJson({ ok: true, state: 'authenticated', user: issued.user }), issued.cookies); }
@@ -298,7 +339,15 @@ async function decidePublication(request: Request, env: Env, requestId: string) 
   if (!recordRequest) return responseJson({ ok: false, error: 'not_found' }, 404); if (recordRequest.status !== 'pending') return responseJson({ ok: false, error: 'decision_recorded' }, 409);
   const now = Date.now(); const changed = await env.DB.prepare("UPDATE publish_requests SET status = ?, reviewer_id = ?, review_note = ?, reviewed_at = ? WHERE id = ? AND status = 'pending'").bind(decision, reviewer.id, note || null, now, requestId).run();
   if (!changed.meta.changes) return responseJson({ ok: false, error: 'decision_recorded' }, 409);
-  if (decision === 'approved') await env.DB.prepare('UPDATE profiles SET published_json = ?, published_version_id = ?, is_published = 1, updated_at = ? WHERE id = ?').bind(recordRequest.submitted_payload_json, recordRequest.id, now, recordRequest.profile_id).run();
+  if (decision === 'approved') {
+    const profileBefore = await env.DB.prepare('SELECT is_published FROM profiles WHERE id = ?').bind(recordRequest.profile_id).first<{ is_published: number }>();
+    await env.DB.prepare('UPDATE profiles SET published_json = ?, published_version_id = ?, is_published = 1, updated_at = ? WHERE id = ?').bind(recordRequest.submitted_payload_json, recordRequest.id, now, recordRequest.profile_id).run();
+    if (!profileBefore?.is_published) {
+      await awardFromTreasury(env, recordRequest.user_id, FIRST_PUBLICATION_REWARD, 'first_publication_bonus', `first-publication:${recordRequest.user_id}`, reviewer.id, { requestId });
+      const referral = await env.DB.prepare('SELECT referred_by_permanent_id FROM users WHERE id = ?').bind(recordRequest.user_id).first<{ referred_by_permanent_id: string | null }>();
+      if (referral?.referred_by_permanent_id) { const referrer = await activeUserByPermanentId(env, referral.referred_by_permanent_id); if (referrer && referrer.id !== recordRequest.user_id) await awardFromTreasury(env, referrer.id, FIRST_PUBLICATION_REWARD, 'referral_first_publication_bonus', `referral-first-publication:${recordRequest.user_id}`, reviewer.id, { referredUserId: recordRequest.user_id, requestId }); }
+    }
+  }
   const message = publicationMail[recordRequest.submission_locale][decision]; const notificationKind = `publication_${decision}` as NotificationRow['kind'];
   await env.DB.batch([
     env.DB.prepare('INSERT INTO notifications (id, user_id, request_id, kind, locale, title, message, is_read, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?)').bind(`notice_${crypto.randomUUID()}`, recordRequest.user_id, requestId, notificationKind, recordRequest.submission_locale, message.title, note ? `${message.text}\n\n${recordRequest.submission_locale === 'ar' ? 'ملاحظة المشرف:' : 'Reviewer note:'}\n${note}` : message.text, now),
@@ -314,18 +363,86 @@ function validGiftLink(value: unknown) { try { const url = new URL(typeof value 
 async function confirmGift(request: Request, env: Env) {
   if (!sameOrigin(request)) return responseJson({ ok: false, error: 'invalid_request' }, 403);
   const user = await authUser(request, env); if (!user) return responseJson({ ok: false, error: 'unauthorized' }, 401);
-  const input = record(await request.json().catch(() => ({}))); const recipient = textOf(input.recipient, 120); const link = validGiftLink(input.link); const idempotencyKey = typeof input.idempotencyKey === 'string' && /^gift_[a-z0-9-]{36}$/.test(input.idempotencyKey) ? input.idempotencyKey : null;
+  const input = record(await request.json().catch(() => ({}))); const recipient = textOf(input.recipient, 120); const link = validGiftLink(input.link); const idempotencyKey = idempotencyOf(input.idempotencyKey, 'gift');
   if (!recipient || !link || !idempotencyKey) return responseJson({ ok: false, error: 'invalid_input' }, 400);
-  const prior = await env.DB.prepare('SELECT id FROM ledger_entries WHERE idempotency_key = ? AND actor_id = ?').bind(idempotencyKey, user.id).first<{ id: string }>();
-  if (prior) { const current = await env.DB.prepare('SELECT id, permanent_id, name, role, wallet_balance, email_verified_at, status, pin_hash, pin_salt, failed_login_attempts, locked_until FROM users WHERE id = ?').bind(user.id).first<UserRow>(); return responseJson({ ok: true, alreadyProcessed: true, user: current ? userView(current) : userView(user) }); }
-  const now = Date.now(); const result = await env.DB.batch([
-    env.DB.prepare('UPDATE users SET wallet_balance = wallet_balance - 100 WHERE id = ? AND wallet_balance >= 100').bind(user.id),
-    env.DB.prepare("INSERT INTO ledger_entries (id, idempotency_key, from_account, to_account, amount, tx_type, metadata_json, actor_id, created_at) SELECT ?, ?, ?, ?, 100, ?, ?, ?, ? WHERE changes() = 1").bind(`ledger_${crypto.randomUUID()}`, idempotencyKey, user.id, 'treasury', 'gift_qr', JSON.stringify({ service: 'client_side_qr_gift' }), user.id, now)
+  const outcome = await debitToTreasury(env, user.id, DAY_REDEMPTION_COST, 'gift_qr', idempotencyKey, { service: 'client_side_qr_gift' });
+  if (!outcome.ok) return responseJson({ ok: false, error: outcome.error }, 409);
+  if (!outcome.idempotent) await env.DB.prepare('INSERT INTO audit_logs (id, tenant_id, actor_id, action, target_type, target_id, details_json, ip_hash, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)').bind(crypto.randomUUID(), 'tenant_main', user.id, 'gift_qr_confirmed', 'ledger_entry', idempotencyKey, JSON.stringify({ amount: DAY_REDEMPTION_COST }), toBase64(await digest(request.headers.get('CF-Connecting-IP') ?? 'unknown')), Date.now()).run();
+  const current = await activeUserById(env, user.id);
+  return responseJson({ ok: true, alreadyProcessed: outcome.idempotent, user: current ? userView({ ...user, wallet_balance: current.wallet_balance }) : userView(user) });
+}
+
+async function accountWallet(request: Request, env: Env) {
+  const user = await authUser(request, env); if (!user) return responseJson({ ok: false, error: 'unauthorized' }, 401);
+  const [entitlement, entries, grants, referral] = await Promise.all([
+    env.DB.prepare('SELECT active_days FROM point_entitlements WHERE user_id = ?').bind(user.id).first<{ active_days: number }>(),
+    env.DB.prepare('SELECT id, from_account, to_account, amount, tx_type, created_at FROM ledger_entries WHERE actor_id = ? OR from_account = ? OR to_account = ? ORDER BY created_at DESC LIMIT 50').bind(user.id, user.id, user.id).all<WalletLedgerRow>(),
+    env.DB.prepare('SELECT id, status, request_reason, grant_category, awarded_amount, reviewer_reason, requested_at FROM point_grant_requests WHERE user_id = ? ORDER BY requested_at DESC LIMIT 20').bind(user.id).all<GrantRequestRow>(),
+    env.DB.prepare('SELECT referred_by_permanent_id FROM users WHERE id = ?').bind(user.id).first<{ referred_by_permanent_id: string | null }>()
   ]);
-  if (!result[0].meta.changes) return responseJson({ ok: false, error: 'insufficient_balance' }, 409);
-  await env.DB.prepare('INSERT INTO audit_logs (id, tenant_id, actor_id, action, target_type, target_id, details_json, ip_hash, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)').bind(crypto.randomUUID(), 'tenant_main', user.id, 'gift_qr_confirmed', 'ledger_entry', idempotencyKey, JSON.stringify({ amount: 100 }), toBase64(await digest(request.headers.get('CF-Connecting-IP') ?? 'unknown')), now).run();
-  const current = await env.DB.prepare('SELECT id, permanent_id, name, role, wallet_balance, email_verified_at, status, pin_hash, pin_salt, failed_login_attempts, locked_until FROM users WHERE id = ?').bind(user.id).first<UserRow>();
-  return responseJson({ ok: true, user: current ? userView(current) : userView(user) });
+  return responseJson({ ok: true, wallet: { balance: user.wallet_balance, permanentId: user.permanent_id, activeDays: entitlement?.active_days ?? 0, referral: { link: `https://vipdid.app/?ref=${encodeURIComponent(user.permanent_id)}`, referrer: referral?.referred_by_permanent_id ?? null }, entries: (entries.results ?? []).map((entry) => ({ id: entry.id, amount: entry.amount, type: entry.tx_type, createdAt: entry.created_at, direction: entry.to_account === user.id ? 'incoming' : 'outgoing' })), grantRequests: (grants.results ?? []).map((entry) => ({ id: entry.id, status: entry.status, reason: entry.request_reason, category: entry.grant_category, amount: entry.awarded_amount, reviewerReason: entry.reviewer_reason, requestedAt: entry.requested_at })) } });
+}
+
+async function walletTransfer(request: Request, env: Env) {
+  if (!sameOrigin(request)) return responseJson({ ok: false, error: 'invalid_request' }, 403);
+  const user = await authUser(request, env); if (!user) return responseJson({ ok: false, error: 'unauthorized' }, 401);
+  const input = record(await request.json().catch(() => ({}))); const recipientPermanentId = permanentIdOf(input.recipientPermanentId); const amount = pointAmountOf(input.amount); const idempotencyKey = idempotencyOf(input.idempotencyKey, 'transfer');
+  if (!recipientPermanentId || !amount || !idempotencyKey) return responseJson({ ok: false, error: 'invalid_input' }, 400);
+  if (recipientPermanentId === user.permanent_id) return responseJson({ ok: false, error: 'self_transfer' }, 400);
+  const recipient = await activeUserByPermanentId(env, recipientPermanentId); if (!recipient) return responseJson({ ok: false, error: 'recipient_not_found' }, 404);
+  const outcome = await transferPoints(env, user.id, recipient.id, amount, idempotencyKey); if (!outcome.ok) return responseJson({ ok: false, error: outcome.error }, 409);
+  const current = await activeUserById(env, user.id); return responseJson({ ok: true, alreadyProcessed: outcome.idempotent, user: current ? userView({ ...user, wallet_balance: current.wallet_balance }) : userView(user) });
+}
+
+async function walletRedeemDays(request: Request, env: Env) {
+  if (!sameOrigin(request)) return responseJson({ ok: false, error: 'invalid_request' }, 403);
+  const user = await authUser(request, env); if (!user) return responseJson({ ok: false, error: 'unauthorized' }, 401);
+  const input = record(await request.json().catch(() => ({}))); const days = pointAmountOf(input.days, 36500); const idempotencyKey = idempotencyOf(input.idempotencyKey, 'redeem');
+  if (!days || !idempotencyKey) return responseJson({ ok: false, error: 'invalid_input' }, 400);
+  const outcome = await redeemDays(env, user.id, days, idempotencyKey); if (!outcome.ok) return responseJson({ ok: false, error: outcome.error }, 409);
+  const current = await activeUserById(env, user.id); return responseJson({ ok: true, alreadyProcessed: outcome.idempotent, user: current ? userView({ ...user, wallet_balance: current.wallet_balance }) : userView(user) });
+}
+
+async function requestPointGrant(request: Request, env: Env) {
+  if (!sameOrigin(request)) return responseJson({ ok: false, error: 'invalid_request' }, 403);
+  const user = await authUser(request, env); if (!user) return responseJson({ ok: false, error: 'unauthorized' }, 401);
+  const reason = textOf(record(await request.json().catch(() => ({}))).reason, 800); if (reason.length < 8) return responseJson({ ok: false, error: 'invalid_input' }, 400);
+  if (await env.DB.prepare("SELECT id FROM point_grant_requests WHERE user_id = ? AND status = 'pending' LIMIT 1").bind(user.id).first<{ id: string }>()) return responseJson({ ok: false, error: 'request_pending' }, 409);
+  const now = Date.now(); await env.DB.batch([
+    env.DB.prepare('INSERT INTO point_grant_requests (id, user_id, tenant_id, status, request_reason, grant_category, awarded_amount, reviewer_id, reviewer_reason, requested_at, reviewed_at) VALUES (?, ?, ?, ?, ?, NULL, NULL, NULL, NULL, ?, NULL)').bind(`grant_${crypto.randomUUID()}`, user.id, 'tenant_main', 'pending', reason, now),
+    env.DB.prepare('INSERT INTO audit_logs (id, tenant_id, actor_id, action, target_type, target_id, details_json, ip_hash, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)').bind(crypto.randomUUID(), 'tenant_main', user.id, 'point_grant_requested', 'point_grant_request', user.id, JSON.stringify({}), toBase64(await digest(request.headers.get('CF-Connecting-IP') ?? 'unknown')), now)
+  ]);
+  return responseJson({ ok: true }, 202);
+}
+
+async function adminWalletOverview(request: Request, env: Env) {
+  const admin = await authUser(request, env); if (!admin) return responseJson({ ok: false, error: 'unauthorized' }, 401); if (admin.role !== 'super_admin') return responseJson({ ok: false, error: 'forbidden' }, 403);
+  const [treasury, requests] = await Promise.all([
+    setting(env, 'treasury_balance'),
+    env.DB.prepare("SELECT g.id, g.status, g.request_reason, g.grant_category, g.awarded_amount, g.reviewer_reason, g.requested_at, u.name AS user_name, u.permanent_id FROM point_grant_requests g JOIN users u ON u.id = g.user_id WHERE g.status = 'pending' ORDER BY g.requested_at ASC LIMIT 50").all<GrantRequestRow>()
+  ]);
+  return responseJson({ ok: true, overview: { treasuryBalance: Math.max(0, Number(treasury ?? '0')), pendingRequests: (requests.results ?? []).map((item) => ({ id: item.id, status: item.status, reason: item.request_reason, category: item.grant_category, amount: item.awarded_amount, reviewerReason: item.reviewer_reason, requestedAt: item.requested_at, userName: item.user_name ?? '', permanentId: item.permanent_id ?? '' })) } });
+}
+
+async function decidePointGrant(request: Request, env: Env, grantId: string) {
+  if (!sameOrigin(request)) return responseJson({ ok: false, error: 'invalid_request' }, 403);
+  const admin = await authUser(request, env); if (!admin) return responseJson({ ok: false, error: 'unauthorized' }, 401); if (admin.role !== 'super_admin') return responseJson({ ok: false, error: 'forbidden' }, 403);
+  const input = record(await request.json().catch(() => ({}))); const decision = input.decision === 'approved' ? 'approved' : input.decision === 'rejected' ? 'rejected' : null; const note = textOf(input.note, 800); const amount = pointAmountOf(input.amount); const category = grantCategoryOf(input.category);
+  if (!decision || !note || (decision === 'approved' && (!amount || !category))) return responseJson({ ok: false, error: 'invalid_input' }, 400);
+  const grant = await env.DB.prepare("SELECT id, user_id, tenant_id FROM point_grant_requests WHERE id = ? AND status = 'pending'").bind(grantId).first<{ id: string; user_id: string; tenant_id: string }>(); if (!grant) return responseJson({ ok: false, error: 'not_found' }, 404);
+  if (decision === 'approved') { const outcome = await awardFromTreasury(env, grant.user_id, amount!, 'admin_grant', `grant-request:${grant.id}`, admin.id, { category, grantRequestId: grant.id }); if (!outcome.ok) return responseJson({ ok: false, error: outcome.error }, 409); }
+  const now = Date.now(); const changed = await env.DB.prepare("UPDATE point_grant_requests SET status = ?, grant_category = ?, awarded_amount = ?, reviewer_id = ?, reviewer_reason = ?, reviewed_at = ? WHERE id = ? AND status = 'pending'").bind(decision, decision === 'approved' ? category : null, decision === 'approved' ? amount : null, admin.id, note, now, grant.id).run(); if (!changed.meta.changes) return responseJson({ ok: false, error: 'decision_recorded' }, 409);
+  return responseJson({ ok: true });
+}
+
+async function adminDirectGrant(request: Request, env: Env) {
+  if (!sameOrigin(request)) return responseJson({ ok: false, error: 'invalid_request' }, 403);
+  const admin = await authUser(request, env); if (!admin) return responseJson({ ok: false, error: 'unauthorized' }, 401); if (admin.role !== 'super_admin') return responseJson({ ok: false, error: 'forbidden' }, 403);
+  const input = record(await request.json().catch(() => ({}))); const recipientPermanentId = permanentIdOf(input.recipientPermanentId); const amount = pointAmountOf(input.amount); const category = grantCategoryOf(input.category); const reason = textOf(input.reason, 800); const idempotencyKey = idempotencyOf(input.idempotencyKey, 'admin_grant');
+  if (!recipientPermanentId || !amount || !category || reason.length < 4 || !idempotencyKey) return responseJson({ ok: false, error: 'invalid_input' }, 400);
+  const recipient = await activeUserByPermanentId(env, recipientPermanentId); if (!recipient) return responseJson({ ok: false, error: 'recipient_not_found' }, 404);
+  const outcome = await awardFromTreasury(env, recipient.id, amount, 'admin_grant', idempotencyKey, admin.id, { category, reason }); if (!outcome.ok) return responseJson({ ok: false, error: outcome.error }, 409);
+  return responseJson({ ok: true, alreadyProcessed: outcome.idempotent });
 }
 
 async function me(request: Request, env: Env) { const user = await authUser(request, env); return responseJson({ ok: true, authenticated: Boolean(user), user: user ? userView(user) : null }); }
@@ -359,6 +476,13 @@ export default {
     if (url.pathname === '/api/account/publication' && request.method === 'POST') return submitPublication(request, env);
     if (url.pathname === '/api/account/notifications' && request.method === 'GET') return accountNotifications(request, env);
     if (url.pathname === '/api/account/gifts' && request.method === 'POST') return confirmGift(request, env);
+    if (url.pathname === '/api/account/wallet' && request.method === 'GET') return accountWallet(request, env);
+    if (url.pathname === '/api/account/wallet/transfer' && request.method === 'POST') return walletTransfer(request, env);
+    if (url.pathname === '/api/account/wallet/redeem-days' && request.method === 'POST') return walletRedeemDays(request, env);
+    if (url.pathname === '/api/account/wallet/grant-requests' && request.method === 'POST') return requestPointGrant(request, env);
+    if (url.pathname === '/api/admin/wallet/overview' && request.method === 'GET') return adminWalletOverview(request, env);
+    if (url.pathname === '/api/admin/wallet/grants' && request.method === 'POST') return adminDirectGrant(request, env);
+    if (url.pathname.startsWith('/api/admin/wallet/grant-requests/') && url.pathname.endsWith('/decision') && request.method === 'POST') return decidePointGrant(request, env, decodeURIComponent(url.pathname.slice('/api/admin/wallet/grant-requests/'.length, -'/decision'.length)));
     if (url.pathname === '/api/admin/publish-requests' && request.method === 'GET') return adminPublishRequests(request, env);
     if (url.pathname.startsWith('/api/admin/publish-requests/') && url.pathname.endsWith('/decision') && request.method === 'POST') return decidePublication(request, env, decodeURIComponent(url.pathname.slice('/api/admin/publish-requests/'.length, -'/decision'.length)));
     const asset = staticAsset(url.pathname);

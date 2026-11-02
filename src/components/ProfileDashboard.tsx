@@ -8,6 +8,7 @@ import { PublicationPanel } from './PublicationPanel';
 import { DocumentTools } from './DocumentTools';
 import { GiftQrService } from './GiftQrService';
 import type { GovernanceCopy } from '../i18n/governance-content';
+import { WalletPortal } from './WalletPortal';
 
 type Props = { locale: ProfileLocale; text: ProfileCopy; governance: GovernanceCopy; user: AuthUser; onNavigate: (route: string) => void; onUserUpdated: (user: AuthUser) => void };
 type Section = { id: string; label: string; field?: keyof ProfileData; hint?: string };
@@ -125,6 +126,7 @@ export function ProfileDashboard({ locale, text, governance, user, onNavigate, o
     <PublicationPanel locale={locale} text={governance} profile={profile} user={user} onSave={save} onProfile={setProfile} />
     <DocumentTools locale={locale} text={governance} profile={profile} />
     <GiftQrService text={governance} profile={profile} user={user} onUser={onUserUpdated} />
+    <WalletPortal locale={locale} user={user} onUserUpdated={onUserUpdated} />
     <footer className="dashboard-footer"><button className="gold-button" type="button" disabled={saving} onClick={() => void save()}>{saving ? text.saving : text.saveDraft}</button><button className="text-button" type="button" onClick={() => onNavigate('/')}>{text.returnHome}</button></footer>
   </main>;
 }

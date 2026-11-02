@@ -1,0 +1,35 @@
+.wallet-shell { display: grid; gap: 1rem; margin-top: 1.25rem; }
+.wallet-hero { padding: clamp(1.35rem, 4vw, 2.4rem); border: 1px solid var(--line); border-radius: 24px; background: radial-gradient(circle at 85% 0, rgba(212,175,55,.16), transparent 34%), linear-gradient(135deg, color-mix(in srgb, var(--surface) 94%, transparent), color-mix(in srgb, var(--surface-strong) 67%, transparent)); box-shadow: 0 18px 48px rgba(0,0,0,.14); }
+.wallet-hero h2, .wallet-shell h3, .wallet-shell h4 { margin: 0; color: var(--ink); }
+.wallet-hero p:not(.eyebrow), .wallet-shell h3 + p { margin: .65rem 0 0; color: var(--muted); line-height: 1.8; }
+.wallet-hero .outline-button { margin-top: 1rem; }
+.wallet-tabs { position: sticky; z-index: 7; top: 1rem; display: flex; gap: .5rem; overflow-x: auto; padding: .48rem; border: 1px solid var(--line); border-radius: 999px; background: color-mix(in srgb, var(--surface-strong) 86%, transparent); box-shadow: 0 10px 30px rgba(0,0,0,.14); backdrop-filter: blur(16px); scrollbar-width: none; }
+.wallet-tabs::-webkit-scrollbar { display: none; }
+.wallet-tabs button { flex: 0 0 auto; border: 1px solid transparent; border-radius: 999px; padding: .55rem .85rem; color: var(--muted); background: transparent; font-size: .82rem; font-weight: 800; }
+.wallet-tabs button:hover, .wallet-tabs button:focus-visible { color: #201707; border-color: rgba(246,217,143,.65); background: linear-gradient(120deg, var(--gold-light), var(--gold)); }
+.wallet-overview, .wallet-history, .wallet-admin { scroll-margin-top: 7rem; }
+.wallet-summary { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: .75rem; margin-top: 1rem; }
+.wallet-summary article, .wallet-admin-balance { display: grid; gap: .3rem; min-width: 0; padding: 1rem; border: 1px solid color-mix(in srgb, var(--line) 75%, transparent); border-radius: 16px; background: color-mix(in srgb, var(--surface-strong) 70%, transparent); }
+.wallet-summary span, .wallet-admin-balance span { color: var(--muted); font-size: .78rem; font-weight: 800; }
+.wallet-summary strong, .wallet-admin-balance strong { overflow: hidden; color: var(--gold-light); font-size: clamp(1.35rem, 3vw, 2rem); text-overflow: ellipsis; white-space: nowrap; }
+.wallet-summary small, .wallet-admin-balance small { color: var(--muted); }
+.wallet-history, .grant-history, .grant-review-list { display: grid; gap: .65rem; margin-top: 1rem; }
+.wallet-history article, .grant-history article, .grant-review-list article { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: .65rem 1rem; padding: .9rem 1rem; border: 1px solid color-mix(in srgb, var(--line) 68%, transparent); border-radius: 16px; background: color-mix(in srgb, var(--surface-strong) 62%, transparent); }
+.wallet-history article strong { min-width: 0; color: var(--ink); }
+.wallet-history article b { color: var(--gold-light); }
+.wallet-history article time, .grant-history time { grid-column: 2 / -1; color: var(--muted); font-size: .78rem; }
+.wallet-credit, .wallet-debit { border-radius: 999px; padding: .28rem .5rem; font-size: .72rem; font-weight: 800; }
+.wallet-credit { color: #1b4d2d; background: #d9f0d8; }
+.wallet-debit { color: #7d2923; background: #f7dfd9; }
+.wallet-form { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .85rem; margin-top: 1rem; }
+.wallet-form label, .grant-review-list label { display: grid; gap: .42rem; color: var(--muted); font-size: .84rem; font-weight: 800; }
+.wallet-form textarea, .wallet-form label:has(textarea) { grid-column: 1 / -1; }
+.wallet-form input, .wallet-form textarea, .wallet-form select, .grant-review-list input, .grant-review-list textarea, .grant-review-list select, .wallet-referral-link input { width: 100%; border: 1px solid var(--line); border-radius: 12px; padding: .72rem .78rem; outline: none; color: var(--ink); background: color-mix(in srgb, var(--surface-strong) 72%, transparent); }
+.wallet-form button { width: fit-content; align-self: end; }
+.wallet-referral-link { display: grid; gap: .45rem; margin-top: 1rem; color: var(--muted); font-size: .84rem; font-weight: 800; }
+.grant-history article, .grant-review-list article { display: block; }
+.grant-history article > * + *, .grant-review-list article > * + * { margin-top: .6rem; }
+.grant-history article p, .grant-review-list article p { margin-bottom: 0; color: var(--muted); line-height: 1.7; }
+.wallet-admin-balance { width: min(100%, 390px); margin: 1rem 0; }
+@media (max-width: 680px) { .wallet-summary, .wallet-form { grid-template-columns: 1fr; } .wallet-form textarea, .wallet-form label:has(textarea) { grid-column: auto; } .wallet-history article { grid-template-columns: auto minmax(0, 1fr); } .wallet-history article b { grid-column: 2; } .wallet-history article time { grid-column: 2; } }
+@media (prefers-reduced-motion: reduce) { .wallet-tabs { scroll-behavior: auto; } }
