@@ -1,6 +1,7 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "vipdid-platform",
+  "account_id": "ad2faca51963edabf4c0f41a44ba91a0",
   "main": "dist-worker/worker.mjs",
   "compatibility_date": "2026-11-01",
   "workers_dev": true,
