@@ -9,8 +9,10 @@ import { DocumentTools } from './DocumentTools';
 import { GiftQrService } from './GiftQrService';
 import type { GovernanceCopy } from '../i18n/governance-content';
 import { WalletPortal } from './WalletPortal';
+import { PartnerRequest } from './PartnerRequest';
+import type { SovereigntyLocale } from '../i18n/sovereignty-content';
 
-type Props = { locale: ProfileLocale; text: ProfileCopy; governance: GovernanceCopy; user: AuthUser; onNavigate: (route: string) => void; onUserUpdated: (user: AuthUser) => void };
+type Props = { locale: ProfileLocale; text: ProfileCopy; governance: GovernanceCopy; sovereignty: Record<string, string | Record<string, string>>; user: AuthUser; onNavigate: (route: string) => void; onUserUpdated: (user: AuthUser) => void };
 type Section = { id: string; label: string; field?: keyof ProfileData; hint?: string };
 
 const pathRule = /^[a-z0-9](?:[a-z0-9-]{1,30}[a-z0-9])$/;
@@ -39,7 +41,7 @@ function messageFor(error: unknown, text: ProfileCopy) {
   return text.saveFailed;
 }
 
-export function ProfileDashboard({ locale, text, governance, user, onNavigate, onUserUpdated }: Props) {
+export function ProfileDashboard({ locale, text, governance, sovereignty, user, onNavigate, onUserUpdated }: Props) {
   const [profile, setProfile] = useState<AccountProfile | null>(null);
   const [dirty, setDirty] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -127,6 +129,7 @@ export function ProfileDashboard({ locale, text, governance, user, onNavigate, o
     <DocumentTools locale={locale} text={governance} profile={profile} />
     <GiftQrService text={governance} profile={profile} user={user} onUser={onUserUpdated} />
     <WalletPortal locale={locale} user={user} onUserUpdated={onUserUpdated} />
+    <PartnerRequest locale={locale as SovereigntyLocale} text={sovereignty as never} />
     <footer className="dashboard-footer"><button className="gold-button" type="button" disabled={saving} onClick={() => void save()}>{saving ? text.saving : text.saveDraft}</button><button className="text-button" type="button" onClick={() => onNavigate('/')}>{text.returnHome}</button></footer>
   </main>;
 }

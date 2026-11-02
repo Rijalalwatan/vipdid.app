@@ -26,7 +26,11 @@ CREATE TABLE IF NOT EXISTS tenants (
   created_by TEXT NOT NULL,
   created_at INTEGER NOT NULL,
   approved_by TEXT,
-  approved_at INTEGER
+  approved_at INTEGER,
+  tenant_type TEXT NOT NULL DEFAULT 'main' CHECK(tenant_type IN ('main', 'partner')),
+  requested_at INTEGER,
+  request_reason TEXT,
+  updated_at INTEGER
 );
 
 CREATE TABLE IF NOT EXISTS users (
@@ -146,6 +150,20 @@ CREATE TABLE IF NOT EXISTS notifications (
   created_at INTEGER NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS custody_invitations (
+  id TEXT PRIMARY KEY,
+  subject_type TEXT NOT NULL CHECK(subject_type IN ('user', 'tenant')),
+  subject_user_id TEXT NOT NULL REFERENCES users(id),
+  tenant_id TEXT NOT NULL REFERENCES tenants(id),
+  recipient_email TEXT NOT NULL COLLATE NOCASE,
+  token_hash TEXT NOT NULL UNIQUE,
+  status TEXT NOT NULL CHECK(status IN ('pending', 'accepted', 'revoked', 'expired')),
+  created_by TEXT NOT NULL REFERENCES users(id),
+  expires_at INTEGER NOT NULL,
+  accepted_at INTEGER,
+  created_at INTEGER NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS audit_logs (
   id TEXT PRIMARY KEY,
   tenant_id TEXT,
@@ -198,7 +216,9 @@ CREATE TABLE IF NOT EXISTS auth_sessions (
 CREATE INDEX IF NOT EXISTS idx_users_tenant_status ON users(tenant_id, status);
 CREATE INDEX IF NOT EXISTS idx_users_referrer ON users(referred_by_permanent_id, status);
 CREATE INDEX IF NOT EXISTS idx_profiles_tenant_slug ON profiles(tenant_id, slug);
-CREATE UNIQUE INDEX IF NOT EXISTS idx_profiles_slug_global ON profiles(slug);
+CREATE INDEX IF NOT EXISTS idx_tenants_type_status ON tenants(tenant_type, status, created_at);
+CREATE INDEX IF NOT EXISTS idx_custody_invitations_subject ON custody_invitations(subject_type, subject_user_id, status, expires_at);
+CREATE INDEX IF NOT EXISTS idx_custody_invitations_email ON custody_invitations(recipient_email, status, expires_at);
 CREATE INDEX IF NOT EXISTS idx_ledger_entries_actor_created ON ledger_entries(actor_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_grant_requests_user_created ON point_grant_requests(user_id, requested_at DESC);
 CREATE INDEX IF NOT EXISTS idx_grant_requests_status_created ON point_grant_requests(status, requested_at ASC);
