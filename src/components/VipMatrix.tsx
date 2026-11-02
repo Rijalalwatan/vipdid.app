@@ -1,10 +1,14 @@
 const streams = [
-  { id: 'one', glyphs: 'VIP     VIP     VIP     VIP     VIP' },
-  { id: 'two', glyphs: 'VIP     VIP     VIP     VIP     VIP' },
-  { id: 'three', glyphs: 'VIP     VIP     VIP     VIP     VIP' },
-  { id: 'four', glyphs: 'VIP     VIP     VIP     VIP     VIP' },
-  { id: 'five', glyphs: 'VIP     VIP     VIP     VIP     VIP' },
-  { id: 'six', glyphs: 'VIP     VIP     VIP     VIP     VIP' }
+  { id: 'one', glyphs: 'VIP     VIP     VIP     VIP     VIP     VIP     VIP     VIP' },
+  { id: 'two', glyphs: 'VIP     VIP     VIP     VIP     VIP     VIP     VIP     VIP' },
+  { id: 'three', glyphs: 'VIP     VIP     VIP     VIP     VIP     VIP     VIP     VIP' },
+  { id: 'four', glyphs: 'VIP     VIP     VIP     VIP     VIP     VIP     VIP     VIP' },
+  { id: 'five', glyphs: 'VIP     VIP     VIP     VIP     VIP     VIP     VIP     VIP' },
+  { id: 'six', glyphs: 'VIP     VIP     VIP     VIP     VIP     VIP     VIP     VIP' },
+  { id: 'seven', glyphs: 'VIP     VIP     VIP     VIP     VIP     VIP     VIP     VIP' },
+  { id: 'eight', glyphs: 'VIP     VIP     VIP     VIP     VIP     VIP     VIP     VIP' },
+  { id: 'nine', glyphs: 'VIP     VIP     VIP     VIP     VIP     VIP     VIP     VIP' },
+  { id: 'ten', glyphs: 'VIP     VIP     VIP     VIP     VIP     VIP     VIP     VIP' }
 ] as const;
 
 type VipMatrixProps = { className?: string };

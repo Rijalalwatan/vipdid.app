@@ -2,7 +2,6 @@ import { useEffect, useState } from 'react';
 import { platformConfig } from '../config/platform.config';
 import { LanguageToggle } from './LanguageToggle';
 import { VipMatrix } from './VipMatrix';
-import { VipTechGlyphs } from './VipTechGlyphs';
 
 type Locale = 'ar' | 'en';
 type JumpItem = { id: string; label: string };
@@ -43,7 +42,6 @@ type PlatformMastheadProps = {
 export function PlatformMasthead({ eyebrow, title, description, compact = false }: PlatformMastheadProps) {
   return (
     <section className={`platform-masthead${compact ? ' masthead-compact' : ''}`} aria-labelledby="platform-masthead-title">
-      <VipTechGlyphs />
       <VipMatrix className="masthead-matrix" />
       <div className="masthead-content">
         <div className="masthead-emblem" aria-hidden="true">
