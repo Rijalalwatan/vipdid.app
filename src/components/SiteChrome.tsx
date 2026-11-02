@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { platformConfig } from '../config/platform.config';
 import { LanguageToggle } from './LanguageToggle';
+import { VipMatrix } from './VipMatrix';
 
 type Locale = 'ar' | 'en';
 type JumpItem = { id: string; label: string };
@@ -41,18 +42,7 @@ type PlatformMastheadProps = {
 export function PlatformMasthead({ eyebrow, title, description, compact = false }: PlatformMastheadProps) {
   return (
     <section className={`platform-masthead${compact ? ' masthead-compact' : ''}`} aria-labelledby="platform-masthead-title">
-      <div className="masthead-circuit" aria-hidden="true">
-        <span className="circuit-orbit circuit-orbit-one" />
-        <span className="circuit-orbit circuit-orbit-two" />
-        <span className="circuit-orbit circuit-orbit-three" />
-        <span className="circuit-beam" />
-        <svg className="circuit-network" viewBox="0 0 900 560" preserveAspectRatio="none">
-          <path d="M18 438 L174 324 L302 401 L448 218 L606 307 L752 136 L886 216" />
-          <path d="M44 164 L198 246 L350 122 L498 280 L655 184 L844 330" />
-          <path d="M128 538 L286 366 L438 446 L586 388 L758 500" />
-          <circle cx="174" cy="324" r="5" /><circle cx="302" cy="401" r="4" /><circle cx="448" cy="218" r="6" /><circle cx="606" cy="307" r="4" /><circle cx="752" cy="136" r="5" /><circle cx="198" cy="246" r="4" /><circle cx="350" cy="122" r="5" /><circle cx="498" cy="280" r="4" /><circle cx="655" cy="184" r="5" /><circle cx="438" cy="446" r="4" />
-        </svg>
-      </div>
+      <VipMatrix className="masthead-matrix" />
       <div className="masthead-content">
         <div className="masthead-emblem" aria-hidden="true">
           <span className="emblem-halo emblem-halo-outer" />
