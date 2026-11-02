@@ -218,7 +218,8 @@ async function publicProfile(env: Env, slug: string) {
   const profile = await env.DB.prepare('SELECT p.id, p.user_id, p.tenant_id, p.slug, p.draft_json, p.is_published, p.storage_used_bytes, p.images_count, p.updated_at, p.created_at, u.name, u.email, u.phone, u.whatsapp FROM profiles p JOIN users u ON u.id = p.user_id WHERE p.slug = ? AND u.status = ?').bind(slug, 'active').first<ProfileRow & { name: string; email: string; phone: string | null; whatsapp: string | null }>();
   if (!profile) return responseJson({ ok: false, error: 'not_found' }, 404);
   const media = (await env.DB.prepare('SELECT id, category, r2_key, size_bytes, created_at FROM media_assets WHERE profile_id = ? ORDER BY created_at ASC').bind(profile.id).all<MediaRow>()).results ?? [];
-  return responseJson({ ok: true, profile: { slug: profile.slug, data: readDraft(profile.draft_json, profile.name), media: media.map(mediaView), contact: { email: profile.email, phone: profile.phone ?? '', whatsapp: profile.whatsapp ?? '' } } });
+  const data = readDraft(profile.draft_json, profile.name);
+  return responseJson({ ok: true, profile: { slug: profile.slug, data, media: media.map(mediaView), contact: { email: data.showEmail ? profile.email : '', phone: data.showPhone ? profile.phone ?? '' : '', whatsapp: data.showWhatsapp ? profile.whatsapp ?? '' : '' } } });
 }
 
 async function me(request: Request, env: Env) { const user = await authUser(request, env); return responseJson({ ok: true, authenticated: Boolean(user), user: user ? userView(user) : null }); }
