@@ -1,14 +1,18 @@
 import { DAY_REDEMPTION_COST, FIRST_PUBLICATION_REWARD, REGISTRATION_REWARD, TREASURY_ACCOUNT, activeUserById, activeUserByPermanentId, awardFromTreasury, debitToTreasury, grantCategoryOf, idempotencyOf, permanentIdOf, pointAmountOf, redeemDays, transferPoints } from './midpoint';
+import { createNativeMailer, type MailTransport, type NativeMailEnv } from './native-mailer';
 
-interface Env {
+interface Env extends NativeMailEnv {
   DB: D1Database;
   MEDIA: R2Bucket;
   RATE_LIMIT: KVNamespace;
-  MAILER: Fetcher;
+  MAILER?: MailTransport;
   SESSION_SIGNING_KEY: string;
   TURNSTILE_SECRET_KEY: string;
   PIN_PEPPER_SECRET: string;
 }
+
+// Optional transport injection is for isolated tests; production has no MAILER service binding.
+function mailer(env: Env): MailTransport { return env.MAILER ?? createNativeMailer(env); }
 
 type Locale = 'ar' | 'en';
 type StaticAsset = { body: string; type: string; immutable: boolean };
@@ -118,7 +122,7 @@ const emailCopy = {
   ar: { subject: 'رمز التحقق من الهوية الرقمية لكبار الشخصيات', intro: 'رمز التحقق الخاص بك هو', expiry: 'ينتهي الرمز خلال عشر دقائق. لا تشاركه مع أي شخص.', text: 'رمز التحقق من الهوية الرقمية لكبار الشخصيات' },
   en: { subject: 'Your VIP Digital ID verification code', intro: 'Your verification code is', expiry: 'This code expires in ten minutes. Do not share it with anyone.', text: 'VIP Digital ID verification code' }
 };
-async function sendCode(env: Env, email: string, code: string, locale: Locale) { const copy = emailCopy[locale]; const text = `${copy.text}\n\n${copy.intro}: ${code}\n\n${copy.expiry}`; const html = `<div dir="${locale === 'ar' ? 'rtl' : 'ltr'}" lang="${locale}"><p>${copy.intro}</p><p style="font-size:28px;font-weight:700;letter-spacing:5px">${code}</p><p>${copy.expiry}</p></div>`; const response = await env.MAILER.fetch(new Request('https://mailer/v1/support/send', { method: 'POST', headers: { 'content-type': 'application/json', 'idempotency-key': `vipdid-code-${await hashed(`${email}:${code}`)}` }, body: JSON.stringify({ to: email, subject: copy.subject, text, html }) })); return response.ok; }
+async function sendCode(env: Env, email: string, code: string, locale: Locale) { const copy = emailCopy[locale]; const text = `${copy.text}\n\n${copy.intro}: ${code}\n\n${copy.expiry}`; const html = `<div dir="${locale === 'ar' ? 'rtl' : 'ltr'}" lang="${locale}"><p>${copy.intro}</p><p style="font-size:28px;font-weight:700;letter-spacing:5px">${code}</p><p>${copy.expiry}</p></div>`; const response = await mailer(env).fetch(new Request('https://mailer/v1/support/send', { method: 'POST', headers: { 'content-type': 'application/json', 'idempotency-key': `vipdid-code-${await hashed(`${email}:${code}`)}` }, body: JSON.stringify({ to: email, subject: copy.subject, text, html }) })); return response.ok; }
 function hostnameForRequest(request: Request) { return new URL(request.url).hostname.toLowerCase().replace(/^www\./, ''); }
 async function allowedTurnstileHostname(env: Env, hostname: string) {
   if (hostname === 'vipdid.app' || hostname.endsWith('.vipdid.app')) return true;
@@ -358,7 +362,7 @@ const publicationMail = {
 function htmlSafe(value: string) { return value.replace(/[&<>"']/g, (character) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[character] ?? character); }
 async function sendPublicationDecision(env: Env, email: string, locale: Locale, decision: 'approved' | 'changes_requested' | 'rejected', note: string, requestId: string) {
   const copy = publicationMail[locale][decision]; const reason = note ? `\n\n${locale === 'ar' ? 'ملاحظة المشرف:' : 'Reviewer note:'}\n${note}` : ''; const direction = locale === 'ar' ? 'rtl' : 'ltr';
-  const response = await env.MAILER.fetch(new Request('https://mailer/v1/support/send', { method: 'POST', headers: { 'content-type': 'application/json', 'idempotency-key': `vipdid-publication-${requestId}-${decision}` }, body: JSON.stringify({ to: email, subject: copy.subject, text: `${copy.title}\n\n${copy.text}${reason}`, html: `<div dir="${direction}" lang="${locale}"><h1>${htmlSafe(copy.title)}</h1><p>${htmlSafe(copy.text)}</p>${note ? `<p><strong>${locale === 'ar' ? 'ملاحظة المشرف:' : 'Reviewer note:'}</strong><br>${htmlSafe(note)}</p>` : ''}</div>` }) }));
+  const response = await mailer(env).fetch(new Request('https://mailer/v1/support/send', { method: 'POST', headers: { 'content-type': 'application/json', 'idempotency-key': `vipdid-publication-${requestId}-${decision}` }, body: JSON.stringify({ to: email, subject: copy.subject, text: `${copy.title}\n\n${copy.text}${reason}`, html: `<div dir="${direction}" lang="${locale}"><h1>${htmlSafe(copy.title)}</h1><p>${htmlSafe(copy.text)}</p>${note ? `<p><strong>${locale === 'ar' ? 'ملاحظة المشرف:' : 'Reviewer note:'}</strong><br>${htmlSafe(note)}</p>` : ''}</div>` }) }));
   return response.ok;
 }
 
@@ -537,7 +541,7 @@ async function managedAccount(env: Env, request: Request, actor: UserRow, tenant
   await auditSovereignty(env, request, actor.id, tenantId, 'managed_account_created', 'user', id, { role, permanentId: permanent, slug }); return { id, email, permanent, profileId };
 }
 
-async function sendCustodyInvitation(env: Env, recipient: string, rawToken: string, locale: Locale, subject: 'user' | 'tenant') { const link = `https://vipdid.app/accept-custody?custody=${encodeURIComponent(rawToken)}`; const arabic = locale === 'ar'; const heading = subject === 'tenant' ? (arabic ? 'دعوة تسليم عهدة العضيد' : 'Partner custody invitation') : (arabic ? 'دعوة تسليم عهدة الحساب' : 'Account custody invitation'); const text = arabic ? `${heading}\n\nأكمل الاستلام عبر الرابط الآمن التالي:\n${link}\n\nينتهي الرابط خلال 72 ساعة.` : `${heading}\n\nComplete the transfer through this secure link:\n${link}\n\nThis link expires in 72 hours.`; const response = await env.MAILER.fetch(new Request('https://mailer/v1/support/send', { method: 'POST', headers: { 'content-type': 'application/json', 'idempotency-key': `vipdid-custody-${await hashed(rawToken)}` }, body: JSON.stringify({ to: recipient, subject: heading, text, html: `<div dir="${arabic ? 'rtl' : 'ltr'}" lang="${locale}"><h1>${htmlSafe(heading)}</h1><p>${htmlSafe(arabic ? 'أكمل الاستلام عبر الرابط الآمن:' : 'Complete the transfer through this secure link:')}</p><p><a href="${htmlSafe(link)}">${htmlSafe(link)}</a></p></div>` }) })); return response.ok; }
+async function sendCustodyInvitation(env: Env, recipient: string, rawToken: string, locale: Locale, subject: 'user' | 'tenant') { const link = `https://vipdid.app/accept-custody?custody=${encodeURIComponent(rawToken)}`; const arabic = locale === 'ar'; const heading = subject === 'tenant' ? (arabic ? 'دعوة تسليم عهدة العضيد' : 'Partner custody invitation') : (arabic ? 'دعوة تسليم عهدة الحساب' : 'Account custody invitation'); const text = arabic ? `${heading}\n\nأكمل الاستلام عبر الرابط الآمن التالي:\n${link}\n\nينتهي الرابط خلال 72 ساعة.` : `${heading}\n\nComplete the transfer through this secure link:\n${link}\n\nThis link expires in 72 hours.`; const response = await mailer(env).fetch(new Request('https://mailer/v1/support/send', { method: 'POST', headers: { 'content-type': 'application/json', 'idempotency-key': `vipdid-custody-${await hashed(rawToken)}` }, body: JSON.stringify({ to: recipient, subject: heading, text, html: `<div dir="${arabic ? 'rtl' : 'ltr'}" lang="${locale}"><h1>${htmlSafe(heading)}</h1><p>${htmlSafe(arabic ? 'أكمل الاستلام عبر الرابط الآمن:' : 'Complete the transfer through this secure link:')}</p><p><a href="${htmlSafe(link)}">${htmlSafe(link)}</a></p></div>` }) })); return response.ok; }
 async function issueCustody(request: Request, env: Env, actor: UserRow, subjectType: 'user' | 'tenant', subjectUserId: string, tenantId: string, recipientValue: unknown, locale: Locale) { const recipient = emailOf(recipientValue); if (!recipient || !(await canManageTenant(env, actor, tenantId))) return responseJson({ ok: false, error: 'forbidden' }, 403); const rawToken = randomToken(36); const now = Date.now(); const id = `custody_${crypto.randomUUID()}`; await env.DB.batch([env.DB.prepare("UPDATE custody_invitations SET status = 'revoked' WHERE subject_type = ? AND subject_user_id = ? AND status = 'pending'").bind(subjectType, subjectUserId), env.DB.prepare('INSERT INTO custody_invitations (id, subject_type, subject_user_id, tenant_id, recipient_email, token_hash, status, created_by, expires_at, accepted_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?)').bind(id, subjectType, subjectUserId, tenantId, recipient, await hashed(rawToken), 'pending', actor.id, now + 72 * 60 * 60 * 1000, now)]); const delivered = await sendCustodyInvitation(env, recipient, rawToken, locale, subjectType); await auditSovereignty(env, request, actor.id, tenantId, `${subjectType}_custody_invited`, subjectType, subjectUserId, { invitationId: id, delivered }); return responseJson({ ok: true, delivered }, 202); }
 async function custodyAccept(request: Request, env: Env) {
   if (!sameOrigin(request)) return responseJson({ ok: false, error: 'invalid_request' }, 403);

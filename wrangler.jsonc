@@ -28,11 +28,10 @@
       "id": "40fc6c20795c49a09e64b5a429511046"
     }
   ],
-  "services": [
+  "send_email": [
     {
-      "binding": "MAILER",
-      "service": "saudi-cv-email-failover",
-      "entrypoint": "PlatformMailer"
+      "name": "EMAIL",
+      "allowed_sender_addresses": ["support@saudi.cv"]
     }
   ]
 }

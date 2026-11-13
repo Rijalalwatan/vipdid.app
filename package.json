@@ -9,6 +9,7 @@
     "process:assets": "node scripts/process-assets.mjs",
     "prepare:seed": "node scripts/prepare-seed.mjs",
     "typecheck": "tsc --noEmit",
+    "test:mail": "node --test scripts/test-native-mailer.mjs",
     "build:web": "pnpm process:assets && vite build",
     "build": "pnpm process:assets && vite build && node scripts/build-worker.mjs",
     "deploy": "pnpm build && wrangler deploy"

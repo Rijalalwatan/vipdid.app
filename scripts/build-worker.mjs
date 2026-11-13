@@ -38,7 +38,17 @@ async function collect(dir, prefix = '') {
   return result;
 }
 
-const assets = await collect(dist);
+// Mail-only deployment may preserve the exact asset table from a verified live snapshot.
+// Normal builds remain unchanged. No credentials are accepted through this argument.
+const snapshotArgument = process.argv.find(value => value.startsWith('--assets-snapshot='));
+const assets = snapshotArgument
+  ? JSON.parse(await fs.readFile(snapshotArgument.slice('--assets-snapshot='.length), 'utf8'))
+  : await collect(dist);
+if (!assets['index.html']) throw new Error('The static asset table must contain index.html.');
+for (const [name, asset] of Object.entries(assets)) {
+  if (name.includes('..') || typeof asset.body !== 'string' || typeof asset.type !== 'string'
+      || typeof asset.immutable !== 'boolean') throw new Error('Invalid static asset snapshot.');
+}
 const source = await fs.readFile(template, 'utf8');
 const marker = 'const STATIC_ASSETS: Record<string, StaticAsset> = __STATIC_ASSETS__;';
 const replacement = `const STATIC_ASSETS: Record<string, StaticAsset> = ${JSON.stringify(assets)};`;
