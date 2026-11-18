@@ -1,0 +1,97 @@
+{
+  "executedAt": "2026-11-18T12:52:57.711Z",
+  "environment": "isolated staging",
+  "database": "e9c42d5e-180c-4ba8-882b-340b3534c7d5",
+  "origin": "https://vipdid-platform-staging.rijalalwatan-com.workers.dev",
+  "tests": [
+    {
+      "name": "private staging blocks all anonymous access",
+      "passed": true,
+      "elapsedMs": 1581
+    },
+    {
+      "name": "staging health verifies its own D1",
+      "passed": true,
+      "elapsedMs": 1597
+    },
+    {
+      "name": "real D1 PIN login works on trusted isolated devices",
+      "passed": true,
+      "elapsedMs": 5205
+    },
+    {
+      "name": "administrator is blocked until an independent factor is enrolled",
+      "passed": true,
+      "elapsedMs": 5550
+    },
+    {
+      "name": "normal user has no MFA gate and no treasury authority",
+      "passed": true,
+      "elapsedMs": 1437
+    },
+    {
+      "name": "supervisor can be created without a public slug",
+      "passed": true,
+      "elapsedMs": 9736
+    },
+    {
+      "name": "accepted scoped supervisor can review, never access sovereignty or treasury",
+      "passed": true,
+      "elapsedMs": 4111
+    },
+    {
+      "name": "ordinary user saves profile and uploads real WebP to isolated R2",
+      "passed": true,
+      "elapsedMs": 5684
+    },
+    {
+      "name": "draft media is denied publicly and available privately to the owner",
+      "passed": true,
+      "elapsedMs": 2391
+    },
+    {
+      "name": "reviewer sees frozen submitted text, path and media",
+      "passed": true,
+      "elapsedMs": 4546
+    },
+    {
+      "name": "human approval atomically publishes only the submitted version and rewards once",
+      "passed": true,
+      "elapsedMs": 6310
+    },
+    {
+      "name": "simultaneous Cloudflare D1 transfers are charged once and reject a changed payload",
+      "passed": true,
+      "elapsedMs": 3792
+    },
+    {
+      "name": "registered contact can be corrected without changing published snapshot",
+      "passed": true,
+      "elapsedMs": 1369
+    },
+    {
+      "name": "personal-data copy includes real media and excludes credentials",
+      "passed": true,
+      "elapsedMs": 2641
+    },
+    {
+      "name": "native R2 encrypted round-trip succeeds on a staged image only",
+      "passed": true,
+      "elapsedMs": 3287
+    },
+    {
+      "name": "consent withdrawal immediately hides approved profile and its media",
+      "passed": true,
+      "elapsedMs": 3296
+    },
+    {
+      "name": "data deletion erases staged media, closes points and revokes the session",
+      "passed": true,
+      "elapsedMs": 7055
+    }
+  ],
+  "count": 17,
+  "productionFixturesCreated": false,
+  "realEmailsSent": false,
+  "browserUsed": false
+}

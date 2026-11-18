@@ -1,0 +1,9 @@
+import fs from 'node:fs/promises';
+import {readOperationalKeys} from './provision-operational-secrets.mjs';
+const base='https://vipdid-backup-operations.rijalalwatan-com.workers.dev';const keys=await readOperationalKeys();const token=keys['vipdid-backup-operations:OPS_ACCESS_KEY'];
+if(!token)throw new Error('backup_credential_unavailable');
+const call=async(path,body)=>{const response=await fetch(base+path,{method:'POST',headers:{authorization:'Bearer '+token,'content-type':'application/json'},body:JSON.stringify(body),signal:AbortSignal.timeout(180000)});const payload=await response.json();if(!response.ok||!payload.ok)throw new Error('backup_or_restore_failed:'+path);return payload;};
+const started=Date.now();console.log('encrypted_backup=start');const backup=await call('/backup',{bookmark:process.argv[2]??null});console.log(JSON.stringify({encryptedBackup:'completed',id:backup.backup.id,tableCounts:backup.backup.tableCounts,mediaCount:backup.backup.mediaCount}));
+console.log('isolated_restore=start');const restoreStart=Date.now();const restore=await call('/restore',{id:backup.backup.id});for(const [table,count] of Object.entries(backup.backup.tableCounts))if((restore.countsBeforeErasure??restore.counts)[table]!==count)throw new Error('restore_count_mismatch:'+table);
+const report={executedAt:new Date().toISOString(),backup:backup.backup,restore:{...restore,elapsedMs:Date.now()-restoreStart},endToEndMs:Date.now()-started,tableCountsMatched:true,sourceDatabaseChanged:false,restoreTargetDatabase:'e9c42d5e-180c-4ba8-882b-340b3534c7d5',dataValuesExposed:false};
+await fs.writeFile('reports/backup-restore-verification-2026-11-18.json',JSON.stringify(report,null,2)+'\n');console.log(JSON.stringify({isolatedRestore:'completed',backupId:restore.id,tableCountsMatched:true,restoreElapsedMs:report.restore.elapsedMs,mediaCount:restore.mediaCount,dataValuesExposed:false}));

@@ -19,7 +19,7 @@ const worker = requireText('worker/template.ts', [
   'RETURNING value',
   'mediaAsset(request, env, id)',
   "snapshotOf(media.published_json, media.name).mediaIds.includes(id)",
-  "'cache-control': published ? 'public, max-age=31536000, immutable' : 'private, no-cache, no-store'",
+  "'cache-control': published ? 'public, max-age=0, must-revalidate' : 'private, no-cache, no-store'",
   'allowedTurnstileHostname',
   'custom_domain = ?',
   'issued === requested',

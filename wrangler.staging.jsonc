@@ -20,6 +20,10 @@
     {
       "binding": "MEDIA",
       "bucket_name": "vipdid-staging-media"
+    },
+    {
+      "binding": "BACKUPS",
+      "bucket_name": "vipdid-staging-media"
     }
   ],
   "vars": {

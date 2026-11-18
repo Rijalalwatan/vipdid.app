@@ -1,0 +1,45 @@
+{
+  "capturedAt": "2026-11-18T12:49:18.130Z",
+  "sourceBytes": 7348956,
+  "sha256": "6c048f6b8a51002e2f5cf87aafae0ec5dcbc42594d001065c9b2b27f0d215bee",
+  "bindings": [
+    {
+      "name": "DATA_ENCRYPTION_KEY",
+      "type": "secret_text"
+    },
+    {
+      "name": "DB",
+      "type": "d1"
+    },
+    {
+      "name": "EMAIL",
+      "type": "send_email"
+    },
+    {
+      "name": "MEDIA",
+      "type": "r2_bucket"
+    },
+    {
+      "name": "PIN_PEPPER_SECRET",
+      "type": "secret_text"
+    },
+    {
+      "name": "RATE_LIMIT",
+      "type": "kv_namespace"
+    },
+    {
+      "name": "RESEND_API_KEY",
+      "type": "secret_text"
+    },
+    {
+      "name": "SESSION_SIGNING_KEY",
+      "type": "secret_text"
+    },
+    {
+      "name": "TURNSTILE_SECRET_KEY",
+      "type": "secret_text"
+    }
+  ],
+  "encryptedRuntimeCheckpoint": true,
+  "secretValuesExposed": false
+}

@@ -12,7 +12,9 @@
     "test:mail": "node --test scripts/test-native-mailer.mjs",
     "build:web": "pnpm process:assets && vite build",
     "build": "pnpm process:assets && vite build && node scripts/build-worker.mjs",
-    "deploy": "pnpm build && wrangler deploy"
+    "deploy": "pnpm build && wrangler deploy",
+    "test:required-gaps": "node scripts/test-required-gaps.mjs",
+    "build:backup": "esbuild worker/backup-worker.ts --bundle --format=esm --platform=browser --outfile=dist-backup/worker.mjs"
   },
   "dependencies": {
     "@vitejs/plugin-react": "4.7.0",
