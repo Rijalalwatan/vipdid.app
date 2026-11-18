@@ -1,0 +1,48 @@
+import { fingerprint,openBox,secretBox } from './atomic';
+type Env={DB:D1Database;MEDIA:R2Bucket;BACKUPS:R2Bucket;RESTORE_DB:D1Database;RESTORE_MEDIA:R2Bucket;BACKUP_ENCRYPTION_KEY:string;DATA_ENCRYPTION_KEY:string;OPS_ACCESS_KEY:string;RESTORE_ENVIRONMENT:string};
+type Table={name:string;sql:string};type Dump={tables:Array<Table&{rows:Record<string,unknown>[]}>,indexes:Table[],createdAt:number,bookmark:string|null};
+const json=(value:unknown,status=200)=>Response.json(value,{status,headers:{'cache-control':'private,no-store','x-content-type-options':'nosniff'}});
+const quote=(name:string)=>'"'+name.replaceAll('"','""')+'"';
+const encode=(bytes:Uint8Array)=>{let s='';for(const b of bytes)s+=String.fromCharCode(b);return btoa(s);};
+const decode=(value:string)=>Uint8Array.from(atob(value),c=>c.charCodeAt(0));
+function authorized(request:Request,env:Env){const expected='Bearer '+env.OPS_ACCESS_KEY;const value=request.headers.get('authorization')??'';if(!env.OPS_ACCESS_KEY||value.length!==expected.length)return false;let result=0;for(let i=0;i<value.length;i++)result|=value.charCodeAt(i)^expected.charCodeAt(i);return result===0;}
+export async function makeBackup(env:Env,bookmark:string|null=null){
+ const id=crypto.randomUUID();const createdAt=Date.now();const prefix=`snapshots/${id}/`;
+ const schema=await env.DB.prepare("SELECT name,sql FROM sqlite_schema WHERE type='table' AND name NOT GLOB 'sqlite_*' AND name NOT GLOB '_cf_*' AND sql IS NOT NULL ORDER BY name").all<Table>();
+ const tables=schema.results??[];
+ const results=await env.DB.batch(tables.map(t=>env.DB.prepare(`SELECT * FROM ${quote(t.name)}`)));
+ const indexes=(await env.DB.prepare("SELECT name,sql FROM sqlite_schema WHERE type IN ('index','trigger') AND name NOT GLOB 'sqlite_*' AND sql IS NOT NULL ORDER BY type,name").all<Table>()).results??[];
+ const dump:Dump={tables:tables.map((t,i)=>({...t,rows:(results[i].results??[]) as Record<string,unknown>[]})),indexes,createdAt,bookmark};
+ const raw=JSON.stringify(dump);if(raw.length>50*1024*1024)throw new Error('backup_snapshot_requires_pagination');
+ await env.BACKUPS.put(prefix+'db.enc',await secretBox(raw,env.BACKUP_ENCRYPTION_KEY),{httpMetadata:{contentType:'application/octet-stream',cacheControl:'private,no-store'}});
+ const assets=dump.tables.find(t=>t.name==='media_assets')?.rows??[];const media:Array<{source:string;object:string;digest:string;size:number}>=[];
+ for(const row of assets){const source=String(row.r2_key);const object=await env.MEDIA.get(source);if(!object)throw new Error('missing_backup_media');const bytes=new Uint8Array(await object.arrayBuffer());const objectKey=prefix+'media/'+await fingerprint(source)+'.enc';const digest=await fingerprint(encode(bytes));await env.BACKUPS.put(objectKey,await secretBox(JSON.stringify({source,data:encode(bytes),httpMetadata:object.httpMetadata}),env.BACKUP_ENCRYPTION_KEY),{httpMetadata:{contentType:'application/octet-stream',cacheControl:'private,no-store'}});media.push({source,object:objectKey,digest,size:bytes.byteLength});}
+ const manifest={id,createdAt,dbObject:prefix+'db.enc',dbDigest:await fingerprint(raw),media,bookmark};
+ await env.BACKUPS.put(prefix+'manifest.enc',await secretBox(JSON.stringify(manifest),env.BACKUP_ENCRYPTION_KEY),{httpMetadata:{contentType:'application/octet-stream',cacheControl:'private,no-store'}});
+ const summary={id,createdAt,tableCounts:Object.fromEntries(dump.tables.map(t=>[t.name,t.rows.length])),mediaCount:media.length,bookmark,digest:manifest.dbDigest};
+ await env.BACKUPS.put(`catalog/${id}.json`,JSON.stringify(summary),{httpMetadata:{contentType:'application/json',cacheControl:'private,no-store'}});
+ return summary;
+}
+export async function restoreToStaging(env:Env,id:string){
+ if(env.RESTORE_ENVIRONMENT!=='staging')throw new Error('restore_target_not_isolated');
+ const object=await env.BACKUPS.get(`snapshots/${id}/manifest.enc`);if(!object)throw new Error('backup_not_found');
+ const manifest=JSON.parse(await openBox(await object.text(),env.BACKUP_ENCRYPTION_KEY));const dbObject=await env.BACKUPS.get(manifest.dbObject);if(!dbObject)throw new Error('backup_not_found');
+ const raw=await openBox(await dbObject.text(),env.BACKUP_ENCRYPTION_KEY);if(await fingerprint(raw)!==manifest.dbDigest)throw new Error('backup_integrity_failed');const dump=JSON.parse(raw) as Dump;
+ const existing=await env.RESTORE_DB.prepare("SELECT name FROM sqlite_schema WHERE type='table' AND name NOT GLOB 'sqlite_*' AND name NOT GLOB '_cf_*'").all<{name:string}>();if(existing.results?.length)throw new Error('restore_target_not_empty');
+ const commands=[env.RESTORE_DB.prepare('PRAGMA defer_foreign_keys=ON')];
+ for(const table of dump.tables)commands.push(env.RESTORE_DB.prepare(table.sql));
+ for(const table of dump.tables){for(const row of table.rows){const columns=Object.keys(row);commands.push(env.RESTORE_DB.prepare(`INSERT INTO ${quote(table.name)} (${columns.map(quote).join(',')}) VALUES (${columns.map(()=>'?').join(',')})`).bind(...columns.map(c=>row[c] as string|number|null)));}}
+ for(const index of dump.indexes)commands.push(env.RESTORE_DB.prepare(index.sql));
+ await env.RESTORE_DB.batch(commands);
+ for(const item of manifest.media){const obj=await env.BACKUPS.get(item.object);if(!obj)throw new Error('backup_media_missing');const payload=JSON.parse(await openBox(await obj.text(),env.BACKUP_ENCRYPTION_KEY));const bytes=decode(payload.data);if(await fingerprint(payload.data)!==item.digest)throw new Error('backup_media_integrity_failed');await env.RESTORE_MEDIA.put(payload.source,bytes,{httpMetadata:payload.httpMetadata});}
+ // Independent erasure manifests take precedence over any older backup.
+ let cursor:string|undefined;let appliedErasures=0;
+ do{const listing=await env.BACKUPS.list({prefix:'erasures/',cursor});for(const entry of listing.objects){const obj=await env.BACKUPS.get(entry.key);if(!obj)throw new Error('erasure_manifest_missing');const m=JSON.parse(await openBox(await obj.text(),env.DATA_ENCRYPTION_KEY));const columns=await env.RESTORE_DB.prepare('PRAGMA table_info(profiles)').all<{name:string}>();const privacy=columns.results?.some(c=>c.name==='privacy_hidden');await env.RESTORE_DB.batch([env.RESTORE_DB.prepare("UPDATE users SET name='Deleted account',email=?,phone='',whatsapp='',pin_hash=NULL,pin_salt=NULL,status='suspended' WHERE id=?").bind(`deleted-${crypto.randomUUID()}@deleted.invalid`,m.userId),env.RESTORE_DB.prepare(`UPDATE profiles SET is_published=0,draft_json='{}',published_json=NULL${privacy?',privacy_hidden=1,published_contact_json=NULL':''} WHERE user_id=?`).bind(m.userId),env.RESTORE_DB.prepare('UPDATE auth_sessions SET revoked_at=? WHERE user_id=?').bind(Date.now(),m.userId)]);if(m.mediaKeys?.length)await env.RESTORE_MEDIA.delete(m.mediaKeys);appliedErasures++;}cursor=listing.truncated?listing.cursor:undefined;}while(cursor);
+ const counts:Record<string,number>={};for(const t of dump.tables){const count=await env.RESTORE_DB.prepare(`SELECT COUNT(*) n FROM ${quote(t.name)}`).first<{n:number}>();counts[t.name]=count?.n??0;}
+ return{ok:true,id,counts,mediaCount:manifest.media.length,appliedErasures,restoreTarget:'staging'};
+}
+async function expireBackups(env:Env){let cursor:string|undefined;do{const listed=await env.BACKUPS.list({prefix:'catalog/',cursor});for(const item of listed.objects){const object=await env.BACKUPS.get(item.key);if(!object)continue;const row=await object.json<{id:string;createdAt:number}>();if(row.createdAt>Date.now()-30*24*60*60*1000)continue;let nested:string|undefined;do{const files=await env.BACKUPS.list({prefix:`snapshots/${row.id}/`,cursor:nested});if(files.objects.length)await env.BACKUPS.delete(files.objects.map(v=>v.key));nested=files.truncated?files.cursor:undefined;}while(nested);await env.BACKUPS.delete(item.key);}cursor=listed.truncated?listed.cursor:undefined;}while(cursor);}
+export default{
+ async fetch(request:Request,env:Env){if(!authorized(request,env))return json({ok:false,error:'unauthorized'},403);try{const url=new URL(request.url);if(url.pathname==='/backup'&&request.method==='POST'){const body=await request.json().catch(()=>({})) as {bookmark?:string};return json({ok:true,backup:await makeBackup(env,body.bookmark??null)});}if(url.pathname==='/restore'&&request.method==='POST'){const body=await request.json() as {id?:string};if(!body.id||!/^[-a-z0-9]{36}$/.test(body.id))return json({ok:false,error:'invalid_input'},400);return json(await restoreToStaging(env,body.id));}if(url.pathname==='/backups'&&request.method==='GET'){const listing=await env.BACKUPS.list({prefix:'catalog/'});const items=[];for(const object of listing.objects){const value=await env.BACKUPS.get(object.key);if(value)items.push(await value.json());}return json({ok:true,backups:items});}if(url.pathname==='/backup-health'){await env.DB.prepare('SELECT 1').first();return json({ok:true});}return json({ok:false,error:'not_found'},404);}catch{return json({ok:false,error:'operation_failed'},409);}},
+ async scheduled(_controller:ScheduledController,env:Env,ctx:ExecutionContext){ctx.waitUntil((async()=>{try{await makeBackup(env);await expireBackups(env);}catch{try{await env.DB.prepare("INSERT INTO operational_incidents(id,category,status,detected_at,summary) SELECT ?, 'backup','open',?,? WHERE NOT EXISTS(SELECT 1 FROM operational_incidents WHERE category='backup' AND status='open')").bind(crypto.randomUUID(),Date.now(),'Encrypted backup did not complete').run();}catch{/* no false success */}}})());}
+};

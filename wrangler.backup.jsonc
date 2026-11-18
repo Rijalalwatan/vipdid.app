@@ -1,0 +1,19 @@
+{
+  "name": "vipdid-backup-operations",
+  "main": "dist-backup/worker.mjs",
+  "account_id": "ad2faca51963edabf4c0f41a44ba91a0",
+  "compatibility_date": "2025-10-01",
+  "keep_vars": true,
+  "vars": { "RESTORE_ENVIRONMENT": "staging" },
+  "d1_databases": [
+    { "binding": "DB", "database_name": "vipdid-platform", "database_id": "be117780-1c27-46c2-8f6d-d3aa03bc09c0" },
+    { "binding": "RESTORE_DB", "database_name": "vipdid-staging", "database_id": "e9c42d5e-180c-4ba8-882b-340b3534c7d5" }
+  ],
+  "r2_buckets": [
+    { "binding": "MEDIA", "bucket_name": "vipdid-media" },
+    { "binding": "BACKUPS", "bucket_name": "vipdid-backups-private" },
+    { "binding": "RESTORE_MEDIA", "bucket_name": "vipdid-staging-media" }
+  ],
+  "triggers": { "crons": ["17 1 * * *"] },
+  "observability": { "enabled": true, "head_sampling_rate": 1 }
+}

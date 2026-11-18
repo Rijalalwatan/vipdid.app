@@ -1,0 +1,29 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "vipdid-platform-staging",
+  "account_id": "ad2faca51963edabf4c0f41a44ba91a0",
+  "main": "dist-worker/worker.mjs",
+  "compatibility_date": "2026-11-01",
+  "keep_vars": true,
+  "workers_dev": true,
+  "observability": {
+    "enabled": true
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "vipdid-staging",
+      "database_id": "e9c42d5e-180c-4ba8-882b-340b3534c7d5"
+    }
+  ],
+  "r2_buckets": [
+    {
+      "binding": "MEDIA",
+      "bucket_name": "vipdid-staging-media"
+    }
+  ],
+  "vars": {
+    "ENVIRONMENT": "staging",
+    "STAGING_HOST": "vipdid-platform-staging.rijalalwatan-com.workers.dev"
+  }
+}

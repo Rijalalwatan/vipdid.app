@@ -9,3 +9,6 @@ dist-worker/
 *.log
 upload/
 raw-assets/
+
+dist-backup/
+.local/

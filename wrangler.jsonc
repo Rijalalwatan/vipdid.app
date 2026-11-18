@@ -20,6 +20,10 @@
     {
       "binding": "MEDIA",
       "bucket_name": "vipdid-media"
+    },
+    {
+      "binding": "BACKUPS",
+      "bucket_name": "vipdid-backups-private"
     }
   ],
   "kv_namespaces": [
@@ -31,7 +35,17 @@
   "send_email": [
     {
       "name": "EMAIL",
-      "allowed_sender_addresses": ["support@saudi.cv"]
+      "allowed_sender_addresses": [
+        "support@saudi.cv"
+      ]
     }
-  ]
+  ],
+  "vars": {
+    "ENVIRONMENT": "production"
+  },
+  "triggers": {
+    "crons": [
+      "*/15 * * * *"
+    ]
+  }
 }

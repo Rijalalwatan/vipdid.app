@@ -1,0 +1,23 @@
+{
+  "capturedAt": "2026-11-18T12:12:26Z",
+  "productionWorker": "vipdid-platform",
+  "sourceHead": "95a9ad8",
+  "productionD1": "be117780-1c27-46c2-8f6d-d3aa03bc09c0",
+  "preMigrationBookmark": "000000a7-00000000-00005127-a30ae4e8c37e86a9e006f8aea314dec5",
+  "bindings": [
+    "DB:d1",
+    "EMAIL:send_email",
+    "MEDIA:r2_bucket",
+    "PIN_PEPPER_SECRET:secret_text",
+    "RATE_LIMIT:kv_namespace",
+    "RESEND_API_KEY:secret_text",
+    "SESSION_SIGNING_KEY:secret_text",
+    "TURNSTILE_SECRET_KEY:secret_text"
+  ],
+  "stagingD1": "e9c42d5e-180c-4ba8-882b-340b3534c7d5",
+  "stagingMedia": "vipdid-staging-media",
+  "backupBucket": "vipdid-backups-private",
+  "access": "not_enabled; no paid plan activated",
+  "productionD1Region": "WEUR",
+  "productionD1Jurisdiction": null
+}

@@ -1,4 +1,8 @@
-import { DAY_REDEMPTION_COST, FIRST_PUBLICATION_REWARD, REGISTRATION_REWARD, TREASURY_ACCOUNT, activeUserById, activeUserByPermanentId, awardFromTreasury, debitToTreasury, grantCategoryOf, idempotencyOf, permanentIdOf, pointAmountOf, redeemDays, transferPoints } from './midpoint';
+import { DAY_REDEMPTION_COST, FIRST_PUBLICATION_REWARD, REGISTRATION_REWARD, TREASURY_ACCOUNT, activeUserById, activeUserByPermanentId, awardStatements, awardFromTreasury, debitToTreasury, grantCategoryOf, idempotencyOf, permanentIdOf, pointAmountOf, redeemDays, transferPoints } from './midpoint';
+import { claimStatement, fingerprint, recordedOperation, reserveAttempt, releaseSuccessfulAttempt, secretBox, openBox } from './atomic';
+import { runMaintenance,acknowledgeIncident } from './maintenance';
+import { privacyOverview,privacyRequest,reviewPrivacyRequests,decidePrivacyRequest,retryErasure } from './privacy';
+import { adminMfaVerified, adminSecurity } from './admin-mfa';
 import { createNativeMailer, type MailTransport, type NativeMailEnv } from './native-mailer';
 
 interface Env extends NativeMailEnv {
@@ -9,10 +13,15 @@ interface Env extends NativeMailEnv {
   SESSION_SIGNING_KEY: string;
   TURNSTILE_SECRET_KEY: string;
   PIN_PEPPER_SECRET: string;
+  DATA_ENCRYPTION_KEY: string;
+  ENVIRONMENT?: string;
+  STAGING_HOST?: string;
+  BACKUPS?: R2Bucket;
+  STAGING_ACCESS_KEY?: string;
 }
 
 // Optional transport injection is for isolated tests; production has no MAILER service binding.
-function mailer(env: Env): MailTransport { return env.MAILER ?? createNativeMailer(env); }
+function mailer(env: Env): MailTransport { if(env.MAILER)return env.MAILER; if(env.ENVIRONMENT==='staging')return {fetch:async()=>new Response(JSON.stringify({error:'Staging delivery disabled'}),{status:503})}; return createNativeMailer(env); }
 
 type Locale = 'ar' | 'en';
 type StaticAsset = { body: string; type: string; immutable: boolean };
@@ -21,10 +30,10 @@ type PublicResult = { slug: string; name: string; title: string; summary: string
 type UserRow = { id: string; permanent_id: string; name: string; role: 'user' | 'moderator' | 'adheed' | 'super_admin'; wallet_balance: number; email_verified_at: number | null; status: string; pin_hash: string | null; pin_salt: string | null; failed_login_attempts: number; locked_until: number | null };
 type ChallengeRow = { id: string; user_id: string | null; code_hash: string; code_salt: string; expires_at: number; attempts: number; max_attempts: number };
 type MediaCategory = 'avatar' | 'cover' | 'skill' | 'portfolio';
-type ProfileRow = { id: string; user_id: string; tenant_id: string; slug: string; draft_json: string; published_json: string | null; is_published: number; storage_used_bytes: number; images_count: number; updated_at: number; created_at: number };
+type ProfileRow = { id: string; user_id: string; tenant_id: string; slug: string; draft_slug: string | null; published_contact_json: string | null; privacy_hidden: number; draft_json: string; published_json: string | null; is_published: number; storage_used_bytes: number; images_count: number; updated_at: number; created_at: number };
 type MediaRow = { id: string; category: MediaCategory; r2_key: string; size_bytes: number; created_at: number };
 type ContactRow = { email: string; phone: string | null; whatsapp: string | null; tenant_id: string };
-type PublicationRow = { id: string; status: 'pending' | 'approved' | 'changes_requested' | 'rejected'; review_note: string | null; submitted_at: number; reviewed_at: number | null; submitted_payload_json: string; submission_locale: Locale };
+type PublicationRow = { id: string; status: 'pending' | 'approved' | 'changes_requested' | 'rejected'; review_note: string | null; submitted_at: number; reviewed_at: number | null; submitted_payload_json: string; submission_locale: Locale; submitted_slug: string | null; submitted_contact_json: string | null };
 type ReviewRequestRow = PublicationRow & { slug: string; owner_name: string; owner_email: string };
 type NotificationRow = { id: string; kind: 'publication_approved' | 'publication_changes_requested' | 'publication_rejected'; title: string; message: string; created_at: number };
 type WalletLedgerRow = { id: string; from_account: string; to_account: string; amount: number; tx_type: string; created_at: number };
@@ -80,7 +89,25 @@ async function verifyUserPin(env: Env, user: UserRow, pin: string) {
   }
   return legacy;
 }
-async function requireStepUpPin(env: Env, user: UserRow, value: unknown) { const pin = pinOf(value); return Boolean(pin && await verifyUserPin(env, user, pin)); }
+async function requireStepUpPin(env: Env, user: UserRow, value: unknown) {
+  const pin = pinOf(value); return Boolean(pin && await verifiedPinAttempt(env, user, pin));
+}
+async function verifiedPinAttempt(env: Env, user: UserRow, pin: string) {
+  const now = Date.now(); const key = `pin:${user.id}`;
+  const state = await env.DB.prepare('SELECT locked_until FROM users WHERE id = ?').bind(user.id).first<{ locked_until: number | null }>();
+  if (state?.locked_until && state.locked_until > now) return false;
+  if (!(await reserveAttempt(env.DB, key, 5, 15 * 60 * 1000))) return false;
+  const good = await verifyUserPin(env, user, pin);
+  if (good) {
+    await releaseSuccessfulAttempt(env.DB, key);
+    await env.DB.prepare('UPDATE users SET failed_login_attempts = 0, locked_until = NULL WHERE id = ?').bind(user.id).run();
+  } else {
+    await env.DB.prepare(`UPDATE users SET failed_login_attempts = CASE WHEN locked_until IS NOT NULL AND locked_until <= ? THEN 1 ELSE failed_login_attempts + 1 END,
+      locked_until = CASE WHEN (CASE WHEN locked_until IS NOT NULL AND locked_until <= ? THEN 1 ELSE failed_login_attempts + 1 END) >= 5 THEN ? ELSE NULL END WHERE id = ?`).bind(now, now, now + 15 * 60 * 1000, user.id).run();
+  }
+  return good;
+}
+
 async function pause(milliseconds: number) { await new Promise<void>((resolve) => setTimeout(resolve, milliseconds)); }
 async function allocatePermanentId(env: Env) {
   for (let attempt = 0; attempt < 3; attempt += 1) {
@@ -98,7 +125,12 @@ async function allocatePermanentId(env: Env) {
 }
 function localeOf(value: unknown): Locale { return value === 'en' ? 'en' : 'ar'; }
 function emailOf(value: unknown) { const email = typeof value === 'string' ? value.trim().toLowerCase() : ''; return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) && email.length <= 254 ? email : null; }
-function phoneOf(value: unknown) { const phone = typeof value === 'string' ? value.trim() : ''; return !phone || (/^[0-9+()\s-]{5,28}$/.test(phone) ? phone : null); }
+function phoneOf(value: unknown): string | null {
+  const phone = typeof value === 'string' ? value.trim() : '';
+  if (!phone) return '';
+  return /^[0-9+()\s-]{5,28}$/.test(phone) ? phone : null;
+}
+
 function pinOf(value: unknown) { return typeof value === 'string' && /^\d{6}$/.test(value) ? value : null; }
 function cookie(request: Request, name: string) { return request.headers.get('cookie')?.match(new RegExp(`(?:^|;\\s*)${name}=([^;]+)`))?.[1] ?? null; }
 function sessionCookie(value: string) { return `vipdid_session=${value}; Path=/; Max-Age=${SESSION_SECONDS}; HttpOnly; Secure; SameSite=None`; }
@@ -114,9 +146,17 @@ function userView(user: UserRow) { return { id: user.id, permanentId: user.perma
 async function setting(env: Env, key: string) { return (await env.DB.prepare('SELECT value FROM system_settings WHERE key = ?').bind(key).first<{ value: string }>())?.value ?? null; }
 async function hasAccess(request: Request, env: Env) { const value = cookie(request, 'vipdid_access'); if (!value) return false; const [payload, signature] = value.split('.'); if (!payload || !signature || !equal(encoder.encode(await sign(payload, env.SESSION_SIGNING_KEY)), encoder.encode(signature))) return false; try { const decoded = JSON.parse(decoder.decode(fromBase64(payload))) as { expiresAt?: number }; return typeof decoded.expiresAt === 'number' && decoded.expiresAt > Date.now(); } catch { return false; } }
 async function locked(request: Request, env: Env) { return (await setting(env, 'site_lock_enabled')) === '1' && !(await hasAccess(request, env)); }
-async function limited(env: Env, request: Request, label: string, email: string, maximum: number, seconds: number) { const ip = request.headers.get('CF-Connecting-IP') ?? 'unknown'; const key = `auth:${label}:${toBase64Url(await digest(`${ip}:${email}`)).slice(0, 30)}`; const count = Number(await env.RATE_LIMIT.get(key) ?? '0'); if (count >= maximum) return true; await env.RATE_LIMIT.put(key, String(count + 1), { expirationTtl: seconds }); return false; }
-async function clearLimit(env: Env, request: Request, label: string, email: string) { const ip = request.headers.get('CF-Connecting-IP') ?? 'unknown'; const key = `auth:${label}:${toBase64Url(await digest(`${ip}:${email}`)).slice(0, 30)}`; await env.RATE_LIMIT.delete(key); }
-async function publicSearch(request: Request, env: Env) { const tenant = await tenantForRequest(request, env); if (!tenant) return responseJson({ results: [] }); const url = new URL(request.url); const query = (url.searchParams.get('q') ?? '').trim().slice(0, 80).toLowerCase(); const featured = url.searchParams.get('featured') === '1'; const conditions = ['tenant_id = ?', 'is_published = 1', 'allow_search_indexing = 1']; const values: (string | number)[] = [tenant.id]; if (featured) { conditions.push('(featured_until IS NOT NULL AND featured_until > ?)'); values.push(Date.now()); } if (query) { conditions.push('(lower(slug) LIKE ? OR lower(COALESCE(published_json, \'\')) LIKE ?)'); const phrase = `%${query.replace(/[\\%_]/g, '\\$&')}%`; values.push(phrase, phrase); } const sql = `SELECT slug, published_json, featured_until FROM profiles WHERE ${conditions.join(' AND ')} ORDER BY featured_until DESC, updated_at DESC LIMIT 20`; const response = await env.DB.prepare(sql).bind(...values).all<SearchRow>(); return responseJson({ results: (response.results ?? []).map(publicResult) }); }
+async function limited(env: Env, request: Request, label: string, email: string, maximum: number, seconds: number) {
+  const identity = email || request.headers.get('CF-Connecting-IP') || 'unknown';
+  const key = `rate:${label}:${await hashed(identity)}`;
+  return !(await reserveAttempt(env.DB, key, maximum, seconds * 1000));
+}
+
+async function clearLimit(_env: Env, _request: Request, _label: string, _email: string) {
+  // Successful authentication must not erase concurrent failed attempts or send limits.
+}
+
+async function publicSearch(request: Request, env: Env) { const tenant = await tenantForRequest(request, env); if (!tenant) return responseJson({ results: [] }); const url = new URL(request.url); const query = (url.searchParams.get('q') ?? '').trim().slice(0, 80).toLowerCase(); const featured = url.searchParams.get('featured') === '1'; const conditions = ['tenant_id = ?', 'is_published = 1', 'privacy_hidden = 0', 'allow_search_indexing = 1']; const values: (string | number)[] = [tenant.id]; if (featured) { conditions.push('(featured_until IS NOT NULL AND featured_until > ?)'); values.push(Date.now()); } if (query) { conditions.push('(lower(slug) LIKE ? OR lower(COALESCE(published_json, \'\')) LIKE ?)'); const phrase = `%${query.replace(/[\\%_]/g, '\\$&')}%`; values.push(phrase, phrase); } const sql = `SELECT slug, published_json, featured_until FROM profiles WHERE ${conditions.join(' AND ')} ORDER BY featured_until DESC, updated_at DESC LIMIT 20`; const response = await env.DB.prepare(sql).bind(...values).all<SearchRow>(); return responseJson({ results: (response.results ?? []).map(publicResult) }); }
 
 const emailCopy = {
   ar: { subject: 'رمز التحقق من الهوية الرقمية لكبار الشخصيات', intro: 'رمز التحقق الخاص بك هو', expiry: 'ينتهي الرمز خلال عشر دقائق. لا تشاركه مع أي شخص.', text: 'رمز التحقق من الهوية الرقمية لكبار الشخصيات' },
@@ -144,10 +184,38 @@ async function createChallenge(env: Env, request: Request, email: string, userId
   env.DB.prepare('UPDATE auth_challenges SET consumed_at = ? WHERE email = ? AND purpose = ? AND consumed_at IS NULL').bind(now, email, purpose),
   env.DB.prepare('INSERT INTO auth_challenges (id, user_id, email, purpose, code_hash, code_salt, locale, attempts, max_attempts, expires_at, consumed_at, requested_ip_hash, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, 0, 6, ?, NULL, ?, ?)').bind(crypto.randomUUID(), userId, email, purpose, codeHash, salt, locale, now + CHALLENGE_MS, ipHash, now)
  ]); return code; }
-async function consumeChallenge(env: Env, email: string, code: string, purpose: 'registration' | 'login' | 'owner_setup') { const now = Date.now(); const challenge = await env.DB.prepare('SELECT id, user_id, code_hash, code_salt, expires_at, attempts, max_attempts FROM auth_challenges WHERE email = ? AND purpose = ? AND consumed_at IS NULL ORDER BY created_at DESC LIMIT 1').bind(email, purpose).first<ChallengeRow>(); if (!challenge || challenge.expires_at <= now) return { ok: false as const, error: 'challenge_expired' }; if (challenge.attempts >= challenge.max_attempts) return { ok: false as const, error: 'challenge_limited' }; const actual = await deriveSecretHash(code, challenge.code_salt); if (!equal(actual, fromBase64(challenge.code_hash))) { await env.DB.prepare('UPDATE auth_challenges SET attempts = attempts + 1 WHERE id = ?').bind(challenge.id).run(); return { ok: false as const, error: 'invalid_code' }; } return { ok: true as const, challenge }; }
+async function consumeChallenge(env: Env, email: string, code: string, purpose: 'registration' | 'login' | 'owner_setup') {
+  const now = Date.now();
+  const current = await env.DB.prepare('SELECT id FROM auth_challenges WHERE email = ? AND purpose = ? AND consumed_at IS NULL ORDER BY created_at DESC LIMIT 1').bind(email, purpose).first<{ id: string }>();
+  if (!current) return { ok: false as const, error: 'challenge_expired' };
+  const challenge = await env.DB.prepare(`UPDATE auth_challenges SET attempts = attempts + 1 WHERE id = ? AND consumed_at IS NULL AND expires_at > ? AND attempts < max_attempts
+    RETURNING id, user_id, code_hash, code_salt, expires_at, attempts, max_attempts`).bind(current.id, now).first<ChallengeRow>();
+  if (!challenge) return { ok: false as const, error: 'challenge_limited' };
+  if (!equal(await deriveSecretHash(code, challenge.code_salt), fromBase64(challenge.code_hash))) return { ok: false as const, error: 'invalid_code' };
+  return { ok: true as const, challenge };
+}
+function challengeClaim(env: Env, challenge: ChallengeRow) {
+  return claimStatement(env.DB, `challenge:${challenge.id}`, challenge.user_id, challenge.id,
+    'EXISTS(SELECT 1 FROM auth_challenges WHERE id = ? AND consumed_at IS NULL AND expires_at > ? AND attempts <= max_attempts)', [challenge.id, Date.now()]);
+}
+
 async function activeDevice(request: Request, env: Env, userId: string) { const token = cookie(request, 'vipdid_device'); if (!token) return null; const device = await env.DB.prepare('SELECT id FROM trusted_devices WHERE user_id = ? AND token_hash = ? AND expires_at > ? AND revoked_at IS NULL').bind(userId, await hashed(token), Date.now()).first<{ id: string }>(); if (device) await env.DB.prepare('UPDATE trusted_devices SET last_used_at = ? WHERE id = ?').bind(Date.now(), device.id).run(); return device; }
-async function issueSession(env: Env, user: UserRow, trustDevice: boolean) { const now = Date.now(); const sessionToken = randomToken(); const sessionId = crypto.randomUUID(); const cookies = [sessionCookie(sessionToken)]; let deviceId: string | null = null; if (trustDevice) { const deviceToken = randomToken(); deviceId = crypto.randomUUID(); await env.DB.prepare('INSERT INTO trusted_devices (id, user_id, token_hash, last_used_at, expires_at, revoked_at, created_at) VALUES (?, ?, ?, ?, ?, NULL, ?)').bind(deviceId, user.id, await hashed(deviceToken), now, now + DEVICE_SECONDS * 1000, now).run(); cookies.push(deviceCookie(deviceToken)); }
- await env.DB.prepare('INSERT INTO auth_sessions (id, user_id, token_hash, trusted_device_id, expires_at, last_seen_at, revoked_at, created_at) VALUES (?, ?, ?, ?, ?, ?, NULL, ?)').bind(sessionId, user.id, await hashed(sessionToken), deviceId, now + SESSION_SECONDS * 1000, now, now).run(); await env.DB.prepare('UPDATE users SET last_login_at = ?, failed_login_attempts = 0, locked_until = NULL WHERE id = ?').bind(now, user.id).run(); return { user: userView(user), cookies }; }
+async function issueSession(env: Env, user: UserRow, trustDevice: boolean, before: D1PreparedStatement[] = []) {
+  const now = Date.now(); const sessionToken = randomToken(); const sessionId = crypto.randomUUID();
+  const cookies = [sessionCookie(sessionToken)]; let deviceId: string | null = null;
+  const commands = [...before];
+  if (trustDevice) {
+    const deviceToken = randomToken(); deviceId = crypto.randomUUID();
+    commands.push(env.DB.prepare('INSERT INTO trusted_devices (id, user_id, token_hash, last_used_at, expires_at, revoked_at, created_at) VALUES (?, ?, ?, ?, ?, NULL, ?)').bind(deviceId, user.id, await hashed(deviceToken), now, now + DEVICE_SECONDS * 1000, now));
+    cookies.push(deviceCookie(deviceToken));
+  }
+  commands.push(env.DB.prepare('INSERT INTO auth_sessions (id, user_id, token_hash, trusted_device_id, expires_at, last_seen_at, revoked_at, created_at) VALUES (?, ?, ?, ?, ?, ?, NULL, ?)').bind(sessionId, user.id, await hashed(sessionToken), deviceId, now + SESSION_SECONDS * 1000, now, now),
+    env.DB.prepare('UPDATE users SET last_login_at = ? WHERE id = ?').bind(now, user.id));
+  await env.DB.batch(commands);
+  const actual = await env.DB.prepare('SELECT wallet_balance FROM users WHERE id = ?').bind(user.id).first<{wallet_balance:number}>();
+  return { user: userView({ ...user, wallet_balance: actual?.wallet_balance ?? user.wallet_balance }), cookies };
+}
+
 async function authUser(request: Request, env: Env) { const token = cookie(request, 'vipdid_session'); if (!token) return null; const user = await env.DB.prepare(`SELECT u.id, u.permanent_id, u.name, u.role, u.wallet_balance, u.email_verified_at, u.status, u.pin_hash, u.pin_salt, u.failed_login_attempts, u.locked_until FROM auth_sessions s JOIN users u ON u.id = s.user_id WHERE s.token_hash = ? AND s.expires_at > ? AND s.revoked_at IS NULL AND u.status = 'active'`).bind(await hashed(token), Date.now()).first<UserRow>(); if (user) await env.DB.prepare('UPDATE auth_sessions SET last_seen_at = ? WHERE token_hash = ?').bind(Date.now(), await hashed(token)).run(); return user; }
 
 async function register(request: Request, env: Env) {
@@ -159,7 +227,8 @@ async function register(request: Request, env: Env) {
   if (await limited(env, request, 'register', email, 4, 900)) return responseJson({ ok: false, error: 'limited' }, 429);
   if (!(await verifyTurnstile(request, env, input.turnstileToken))) return responseJson({ ok: false, error: 'human_failed' }, 400);
   if (referral) { const referrer = await env.DB.prepare("SELECT id, email FROM users WHERE permanent_id = ? AND status = 'active'").bind(referral).first<{ id: string; email: string }>(); if (!referrer || referrer.email.toLowerCase() === email) return responseJson({ ok: false, error: 'invalid_referral' }, 400); }
-  const now = Date.now(); let user = await env.DB.prepare('SELECT id, status, referred_by_permanent_id FROM users WHERE email = ?').bind(email).first<{ id: string; status: string; referred_by_permanent_id: string | null }>();
+  const now = Date.now(); let user = await env.DB.prepare('SELECT id, status, is_managed, referred_by_permanent_id FROM users WHERE email = ?').bind(email).first<{ id: string; status: string; is_managed?: number; referred_by_permanent_id: string | null }>();
+  if (user?.is_managed || user?.status === 'suspended') return responseJson({ ok:false,error:'email_in_use' },409);
   if (user?.status === 'active') return responseJson({ ok: false, error: 'email_in_use' }, 409);
   if (!user) {
     const id = `user_${crypto.randomUUID()}`;
@@ -179,37 +248,57 @@ async function verifyRegistration(request: Request, env: Env) {
   const input = record(await request.json().catch(() => ({}))); const email = emailOf(input.email); const code = pinOf(input.code); const pin = pinOf(input.pin);
   if (!email || !code || !pin) return responseJson({ ok: false, error: 'invalid_input' }, 400);
   const checked = await consumeChallenge(env, email, code, 'registration'); if (!checked.ok) return responseJson({ ok: false, error: checked.error }, 401);
-  const user = await env.DB.prepare("SELECT id, permanent_id, name, role, wallet_balance, email_verified_at, status, pin_hash, pin_salt, failed_login_attempts, locked_until, referred_by_permanent_id FROM users WHERE id = ? AND email = ? AND status = 'pending_verification'").bind(checked.challenge.user_id, email).first<UserRow & { referred_by_permanent_id: string | null }>();
+  const user = await env.DB.prepare("SELECT id, permanent_id, name, role, wallet_balance, email_verified_at, status, pin_hash, pin_salt, failed_login_attempts, locked_until, referred_by_permanent_id, tenant_id FROM users WHERE id = ? AND email = ? AND status = 'pending_verification' AND is_managed = 0").bind(checked.challenge.user_id, email).first<UserRow & { referred_by_permanent_id: string | null; tenant_id: string }>();
   if (!user) return responseJson({ ok: false, error: 'invalid_request' }, 400);
-  let permanentId: string; let pinRecord: { salt: string; hash: string };
-  try { permanentId = await allocatePermanentId(env); pinRecord = await createPinRecord(pin, user.id, env); } catch { return responseJson({ ok: false, error: 'verification_unavailable' }, 503); }
-  const now = Date.now();
   try {
-    await env.DB.batch([
-      env.DB.prepare('UPDATE auth_challenges SET consumed_at = ? WHERE id = ? AND consumed_at IS NULL').bind(now, checked.challenge.id),
-      env.DB.prepare("UPDATE users SET permanent_id = ?, pin_hash = ?, pin_salt = ?, pin_set_at = ?, email_verified_at = ?, status = ? WHERE id = ? AND status = 'pending_verification'").bind(permanentId, pinRecord.hash, pinRecord.salt, now, now, 'active', user.id),
-      env.DB.prepare('INSERT INTO audit_logs (id, tenant_id, actor_id, action, target_type, target_id, details_json, ip_hash, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)').bind(crypto.randomUUID(), 'tenant_main', user.id, 'registration_verified', 'user', user.id, JSON.stringify({ permanentId }), toBase64(await digest(request.headers.get('CF-Connecting-IP') ?? 'unknown')), now)
-    ]);
-  } catch { return responseJson({ ok: false, error: 'verification_failed' }, 409); }
-  const registration = await awardFromTreasury(env, user.id, REGISTRATION_REWARD, 'registration_verification_bonus', `registration-bonus:${user.id}`, user.id, { permanentId });
-  if (!registration.ok) return responseJson({ ok: false, error: registration.error }, 503);
-  if (user.referred_by_permanent_id) {
-    const referrer = await activeUserByPermanentId(env, user.referred_by_permanent_id);
-    if (referrer && referrer.id !== user.id) await awardFromTreasury(env, referrer.id, REGISTRATION_REWARD, 'referral_registration_bonus', `referral-registration:${user.id}`, user.id, { referredUserId: user.id });
-  }
-  const active = { ...user, permanent_id: permanentId, wallet_balance: user.wallet_balance + REGISTRATION_REWARD, email_verified_at: now, status: 'active', pin_hash: pinRecord.hash, pin_salt: pinRecord.salt };
-  const issued = await issueSession(env, active, input.trustDevice !== false); return withCookies(responseJson({ ok: true, user: issued.user }), issued.cookies);
+    const permanentId = await allocatePermanentId(env); const pinRecord = await createPinRecord(pin, user.id, env); const now = Date.now();
+    const commands = [challengeClaim(env, checked.challenge),
+      env.DB.prepare('UPDATE auth_challenges SET consumed_at = ? WHERE id = ?').bind(now, checked.challenge.id),
+      env.DB.prepare("UPDATE users SET permanent_id = ?, pin_hash = ?, pin_salt = ?, pin_set_at = ?, email_verified_at = ?, status = 'active' WHERE id = ? AND status = 'pending_verification'").bind(permanentId, pinRecord.hash, pinRecord.salt, now, now, user.id),
+      ...(await awardStatements(env, user.id, REGISTRATION_REWARD, 'registration_verification_bonus', `registration-bonus:${user.id}`, user.id, { permanentId })),
+      env.DB.prepare('INSERT INTO audit_logs (id, tenant_id, actor_id, action, target_type, target_id, details_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)').bind(crypto.randomUUID(), user.tenant_id, user.id, 'registration_verified', 'user', user.id, JSON.stringify({ permanentId }), now),
+      env.DB.prepare('INSERT INTO consent_events (id,user_id,actor_id,kind,policy_version,created_at) VALUES (?,?,?,?,?,?)').bind(crypto.randomUUID(), user.id, user.id, 'registration_acceptance', '2026-11-18', now)];
+    if (user.referred_by_permanent_id) {
+      const referrer = await activeUserByPermanentId(env, user.referred_by_permanent_id);
+      if (referrer && referrer.id !== user.id) commands.push(...await awardStatements(env, referrer.id, REGISTRATION_REWARD, 'referral_registration_bonus', `referral-registration:${user.id}`, user.id, { referredUserId: user.id }));
+    }
+    const active = { ...user, permanent_id: permanentId, email_verified_at: now, status: 'active', pin_hash: pinRecord.hash, pin_salt: pinRecord.salt };
+    const issued = await issueSession(env, active, input.trustDevice !== false, commands);
+    return withCookies(responseJson({ ok: true, user: issued.user }), issued.cookies);
+  } catch { return responseJson({ ok: false, error: 'verification_unavailable' }, 409); }
 }
 
-async function loginStart(request: Request, env: Env) { if (!sameOrigin(request)) return responseJson({ ok: false, error: 'invalid_request' }, 403); const input = record(await request.json().catch(() => ({}))); const email = emailOf(input.email); const pin = pinOf(input.pin); const locale = localeOf(input.locale); if (!email || !pin) return responseJson({ ok: false, error: 'invalid_login' }, 400); if (await limited(env, request, 'login', email, 8, 900)) return responseJson({ ok: false, error: 'limited' }, 429); const user = await env.DB.prepare(`SELECT id, permanent_id, name, role, wallet_balance, email_verified_at, status, pin_hash, pin_salt, failed_login_attempts, locked_until FROM users WHERE email = ?`).bind(email).first<UserRow>(); const now = Date.now(); if (!user || user.status !== 'active') return responseJson({ ok: false, error: 'invalid_login' }, 401); if (user.locked_until && user.locked_until > now) return responseJson({ ok: false, error: 'account_locked' }, 429); if (!user.pin_hash || !user.pin_salt || !(await verifyUserPin(env, user, pin))) { const attempts = user ? user.failed_login_attempts + 1 : 1; const lockedUntil = attempts >= 5 ? now + 15 * 60 * 1000 : null; if (user) await env.DB.prepare('UPDATE users SET failed_login_attempts = ?, locked_until = ? WHERE id = ?').bind(attempts, lockedUntil, user.id).run(); return responseJson({ ok: false, error: lockedUntil ? 'account_locked' : 'invalid_login' }, 401); }
- await clearLimit(env, request, 'login', email); const device = await activeDevice(request, env, user.id); if (device) { const issued = await issueSession(env, user, false); return withCookies(responseJson({ ok: true, state: 'authenticated', user: issued.user }), issued.cookies); }
- const code = await createChallenge(env, request, email, user.id, 'login', locale); if (!(await sendCode(env, email, code, locale))) return responseJson({ ok: false, error: 'delivery_failed' }, 503); return responseJson({ ok: true, state: 'verification_required' }, 202); }
+async function loginStart(request: Request, env: Env) {
+  if (!sameOrigin(request)) return responseJson({ ok: false, error: 'invalid_request' }, 403);
+  const input = record(await request.json().catch(() => ({}))); const email = emailOf(input.email); const pin = pinOf(input.pin); const locale = localeOf(input.locale);
+  if (!email || !pin) return responseJson({ ok: false, error: 'invalid_login' }, 400);
+  if (await limited(env, request, 'login', email, 20, 900)) return responseJson({ ok: false, error: 'limited' }, 429);
+  const user = await env.DB.prepare('SELECT id, permanent_id, name, role, wallet_balance, email_verified_at, status, pin_hash, pin_salt, failed_login_attempts, locked_until FROM users WHERE email = ?').bind(email).first<UserRow>();
+  if (!user || user.status !== 'active') return responseJson({ ok: false, error: 'invalid_login' }, 401);
+  if (!(await verifiedPinAttempt(env, user, pin))) return responseJson({ ok: false, error: 'invalid_login' }, 401);
+  const device = await activeDevice(request, env, user.id);
+  if (device) { const issued = await issueSession(env, user, false); return withCookies(responseJson({ ok: true, state: 'authenticated', user: issued.user }), issued.cookies); }
+  const code = await createChallenge(env, request, email, user.id, 'login', locale);
+  if (!(await sendCode(env, email, code, locale))) return responseJson({ ok: false, error: 'delivery_failed' }, 503);
+  return responseJson({ ok: true, state: 'verification_required' }, 202);
+}
 
-async function verifyLogin(request: Request, env: Env) { if (!sameOrigin(request)) return responseJson({ ok: false, error: 'invalid_request' }, 403); const input = record(await request.json().catch(() => ({}))); const email = emailOf(input.email); const code = pinOf(input.code); if (!email || !code) return responseJson({ ok: false, error: 'invalid_input' }, 400); const checked = await consumeChallenge(env, email, code, 'login'); if (!checked.ok) return responseJson({ ok: false, error: checked.error }, 401); const user = await env.DB.prepare(`SELECT id, permanent_id, name, role, wallet_balance, email_verified_at, status, pin_hash, pin_salt, failed_login_attempts, locked_until FROM users WHERE id = ? AND email = ? AND status = 'active'`).bind(checked.challenge.user_id, email).first<UserRow>(); if (!user) return responseJson({ ok: false, error: 'invalid_login' }, 401); await env.DB.prepare('UPDATE auth_challenges SET consumed_at = ? WHERE id = ?').bind(Date.now(), checked.challenge.id).run(); const issued = await issueSession(env, user, input.trustDevice !== false); return withCookies(responseJson({ ok: true, state: 'authenticated', user: issued.user }), issued.cookies); }
+async function verifyLogin(request: Request, env: Env) {
+  if (!sameOrigin(request)) return responseJson({ ok: false, error: 'invalid_request' }, 403);
+  const input = record(await request.json().catch(() => ({}))); const email = emailOf(input.email); const code = pinOf(input.code);
+  if (!email || !code) return responseJson({ ok: false, error: 'invalid_input' }, 400);
+  const checked = await consumeChallenge(env, email, code, 'login'); if (!checked.ok) return responseJson({ ok: false, error: checked.error }, 401);
+  const user = await env.DB.prepare("SELECT id, permanent_id, name, role, wallet_balance, email_verified_at, status, pin_hash, pin_salt, failed_login_attempts, locked_until FROM users WHERE id = ? AND email = ? AND status = 'active'").bind(checked.challenge.user_id, email).first<UserRow>();
+  if (!user || (user.locked_until && user.locked_until > Date.now())) return responseJson({ ok: false, error: 'invalid_login' }, 401);
+  try {
+    const issued = await issueSession(env, user, input.trustDevice !== false, [challengeClaim(env, checked.challenge), env.DB.prepare('UPDATE auth_challenges SET consumed_at = ? WHERE id = ?').bind(Date.now(), checked.challenge.id)]);
+    return withCookies(responseJson({ ok: true, state: 'authenticated', user: issued.user }), issued.cookies);
+  } catch { return responseJson({ ok: false, error: 'challenge_expired' }, 409); }
+}
 
-async function ownerStart(request: Request, env: Env) { if (!sameOrigin(request)) return responseJson({ ok: false, error: 'invalid_request' }, 403); const input = record(await request.json().catch(() => ({}))); const email = emailOf(input.email); const locale = localeOf(input.locale); if (!email || email !== OWNER_EMAIL || !(await verifyTurnstile(request, env, input.turnstileToken))) return responseJson({ ok: false, error: 'invalid_login' }, 401); if (await limited(env, request, 'owner', email, 3, 900)) return responseJson({ ok: false, error: 'limited' }, 429); const user = await env.DB.prepare(`SELECT id FROM users WHERE email = ? AND role = 'super_admin'`).bind(email).first<{ id: string }>(); if (!user) return responseJson({ ok: false, error: 'invalid_login' }, 401); const code = await createChallenge(env, request, email, user.id, 'owner_setup', locale); if (!(await sendCode(env, email, code, locale))) return responseJson({ ok: false, error: 'delivery_failed' }, 503); return responseJson({ ok: true, state: 'verification_required' }, 202); }
+async function ownerStart(request: Request, env: Env) { if (!sameOrigin(request)) return responseJson({ ok: false, error: 'invalid_request' }, 403); const input = record(await request.json().catch(() => ({}))); const email = emailOf(input.email); const locale = localeOf(input.locale); if (!email || email !== OWNER_EMAIL || !(await verifyTurnstile(request, env, input.turnstileToken))) return responseJson({ ok: false, error: 'invalid_login' }, 401); if (await limited(env, request, 'owner', email, 3, 900)) return responseJson({ ok: false, error: 'limited' }, 429); const user = await env.DB.prepare(`SELECT id FROM users WHERE email = ? AND role = 'super_admin' AND pin_hash IS NULL AND pin_set_at IS NULL`).bind(email).first<{ id: string }>(); if (!user) return responseJson({ ok: false, error: 'invalid_login' }, 401); const code = await createChallenge(env, request, email, user.id, 'owner_setup', locale); if (!(await sendCode(env, email, code, locale))) return responseJson({ ok: false, error: 'delivery_failed' }, 503); return responseJson({ ok: true, state: 'verification_required' }, 202); }
 
-async function ownerVerify(request: Request, env: Env) { if (!sameOrigin(request)) return responseJson({ ok: false, error: 'invalid_request' }, 403); const input = record(await request.json().catch(() => ({}))); const email = emailOf(input.email); const code = pinOf(input.code); const pin = pinOf(input.pin); if (!email || email !== OWNER_EMAIL || !code || !pin) return responseJson({ ok: false, error: 'invalid_input' }, 400); const checked = await consumeChallenge(env, email, code, 'owner_setup'); if (!checked.ok) return responseJson({ ok: false, error: checked.error }, 401); const user = await env.DB.prepare(`SELECT id, permanent_id, name, role, wallet_balance, email_verified_at, status, pin_hash, pin_salt, failed_login_attempts, locked_until FROM users WHERE id = ? AND email = ? AND role = 'super_admin'`).bind(checked.challenge.user_id, email).first<UserRow>(); if (!user) return responseJson({ ok: false, error: 'invalid_login' }, 401); let pinRecord: { salt: string; hash: string }; try { pinRecord = await createPinRecord(pin, user.id, env); } catch { return responseJson({ ok: false, error: 'verification_unavailable' }, 503); } const now = Date.now(); await env.DB.batch([env.DB.prepare('UPDATE auth_challenges SET consumed_at = ? WHERE id = ?').bind(now, checked.challenge.id), env.DB.prepare('UPDATE users SET pin_hash = ?, pin_salt = ?, pin_set_at = ?, email_verified_at = ?, status = ? WHERE id = ?').bind(pinRecord.hash, pinRecord.salt, now, now, 'active', user.id)]); const issued = await issueSession(env, { ...user, pin_hash: pinRecord.hash, pin_salt: pinRecord.salt, email_verified_at: now, status: 'active' }, input.trustDevice !== false); return withCookies(responseJson({ ok: true, state: 'authenticated', user: issued.user }), issued.cookies); }
+async function ownerVerify(request: Request, env: Env) { if (!sameOrigin(request)) return responseJson({ ok: false, error: 'invalid_request' }, 403); const input = record(await request.json().catch(() => ({}))); const email = emailOf(input.email); const code = pinOf(input.code); const pin = pinOf(input.pin); if (!email || email !== OWNER_EMAIL || !code || !pin) return responseJson({ ok: false, error: 'invalid_input' }, 400); const checked = await consumeChallenge(env, email, code, 'owner_setup'); if (!checked.ok) return responseJson({ ok: false, error: checked.error }, 401); const user = await env.DB.prepare(`SELECT id, permanent_id, name, role, wallet_balance, email_verified_at, status, pin_hash, pin_salt, failed_login_attempts, locked_until FROM users WHERE id = ? AND email = ? AND role = 'super_admin'`).bind(checked.challenge.user_id, email).first<UserRow>(); if (!user || user.pin_hash) return responseJson({ ok: false, error: 'pin_already_set' }, 409); let pinRecord: { salt: string; hash: string }; try { pinRecord = await createPinRecord(pin, user.id, env); } catch { return responseJson({ ok: false, error: 'verification_unavailable' }, 503); } const now = Date.now(); const commands = [challengeClaim(env, checked.challenge), claimStatement(env.DB, `owner-setup:${user.id}`, user.id, user.id, 'EXISTS(SELECT 1 FROM users WHERE id = ? AND pin_hash IS NULL AND pin_set_at IS NULL)', [user.id]), env.DB.prepare('UPDATE auth_challenges SET consumed_at = ? WHERE id = ?').bind(now, checked.challenge.id), env.DB.prepare('UPDATE users SET pin_hash = ?, pin_salt = ?, pin_set_at = ?, email_verified_at = ?, status = ? WHERE id = ?').bind(pinRecord.hash, pinRecord.salt, now, now, 'active', user.id), env.DB.prepare('UPDATE auth_sessions SET revoked_at = ? WHERE user_id = ?').bind(now,user.id), env.DB.prepare('UPDATE trusted_devices SET revoked_at = ? WHERE user_id = ?').bind(now,user.id)]; const issued = await issueSession(env, { ...user, pin_hash: pinRecord.hash, pin_salt: pinRecord.salt, email_verified_at: now, status: 'active' }, input.trustDevice !== false, commands); return withCookies(responseJson({ ok: true, state: 'authenticated', user: issued.user }), issued.cookies); }
 
 function slugOf(value: unknown) { const slug = typeof value === 'string' ? value.trim().toLowerCase() : ''; return /^[a-z0-9](?:[a-z0-9-]{1,30}[a-z0-9])$/.test(slug) && !RESERVED_SLUGS.has(slug) ? slug : null; }
 function textOf(value: unknown, maximum = 4000) { return typeof value === 'string' ? value.trim().slice(0, maximum) : ''; }
@@ -238,15 +327,15 @@ function isWebP(bytes: Uint8Array) { return bytes.byteLength >= 12 && decoder.de
 
 async function accountProfileData(env: Env, user: UserRow) {
   const [profile, contact] = await Promise.all([
-    env.DB.prepare('SELECT id, user_id, tenant_id, slug, draft_json, published_json, is_published, storage_used_bytes, images_count, updated_at, created_at FROM profiles WHERE user_id = ?').bind(user.id).first<ProfileRow>(),
+    env.DB.prepare('SELECT id, user_id, tenant_id, slug, draft_slug, published_contact_json, privacy_hidden, draft_json, published_json, is_published, storage_used_bytes, images_count, updated_at, created_at FROM profiles WHERE user_id = ?').bind(user.id).first<ProfileRow>(),
     env.DB.prepare('SELECT email, phone, whatsapp, tenant_id FROM users WHERE id = ?').bind(user.id).first<ContactRow>()
   ]);
   const allMedia = profile ? await allProfileMedia(env, profile.id) : [];
   const snapshot = profile ? snapshotOf(profile.draft_json, user.name) : { data: profileDraft({}, user.name), mediaIds: [], hasMediaSelection: true };
   const selected = snapshot.hasMediaSelection ? allMedia.filter((item) => snapshot.mediaIds.includes(item.id)) : allMedia;
-  const latest = profile ? await env.DB.prepare('SELECT id, status, review_note, submitted_at, reviewed_at, submitted_payload_json, submission_locale FROM publish_requests WHERE profile_id = ? ORDER BY submitted_at DESC LIMIT 1').bind(profile.id).first<PublicationRow>() : null;
+  const latest = profile ? await env.DB.prepare('SELECT id, status, review_note, submitted_at, reviewed_at, submitted_payload_json, submission_locale, submitted_slug, submitted_contact_json FROM publish_requests WHERE profile_id = ? ORDER BY submitted_at DESC LIMIT 1').bind(profile.id).first<PublicationRow>() : null;
   const storage = allMedia.reduce((total, item) => total + item.size_bytes, 0);
-  return { slug: profile?.slug ?? '', data: snapshot.data, media: selected.map(mediaView), imageCount: selected.length, storageUsedBytes: storage, exists: Boolean(profile), contact: { email: contact?.email ?? '', phone: contact?.phone ?? '', whatsapp: contact?.whatsapp ?? '' }, publication: { isPublished: Boolean(profile?.is_published), latestStatus: latest?.status ?? null, latestRequestId: latest?.id ?? null, submittedAt: latest?.submitted_at ?? null, reviewNote: latest?.review_note ?? null } };
+  return { slug: profile?.draft_slug ?? profile?.slug ?? '', data: snapshot.data, media: selected.map(mediaView), imageCount: selected.length, storageUsedBytes: storage, exists: Boolean(profile), contact: { email: contact?.email ?? '', phone: contact?.phone ?? '', whatsapp: contact?.whatsapp ?? '' }, publication: { publishedSlug: profile?.slug ?? '', isPublished: Boolean(profile?.is_published), latestStatus: latest?.status ?? null, latestRequestId: latest?.id ?? null, submittedAt: latest?.submitted_at ?? null, reviewNote: latest?.review_note ?? null } };
 }
 
 async function accountProfile(request: Request, env: Env) { const user = await authUser(request, env); if (!user) return responseJson({ ok: false, error: 'unauthorized' }, 401); return responseJson({ ok: true, profile: await accountProfileData(env, user) }); }
@@ -256,13 +345,13 @@ async function saveAccountProfile(request: Request, env: Env) {
   const user = await authUser(request, env); if (!user) return responseJson({ ok: false, error: 'unauthorized' }, 401);
   const input = record(await request.json().catch(() => ({}))); const slug = slugOf(input.slug);
   if (!slug) return responseJson({ ok: false, error: 'invalid_slug' }, 400);
-  const existing = await env.DB.prepare('SELECT id, user_id, tenant_id, slug, draft_json, published_json, is_published, storage_used_bytes, images_count, updated_at, created_at FROM profiles WHERE user_id = ?').bind(user.id).first<ProfileRow>();
-  const clash = await env.DB.prepare('SELECT id FROM profiles WHERE slug = ? AND user_id != ? AND tenant_id = (SELECT tenant_id FROM users WHERE id = ?)').bind(slug, user.id, user.id).first<{ id: string }>();
+  const existing = await env.DB.prepare('SELECT id, user_id, tenant_id, slug, draft_slug, published_contact_json, privacy_hidden, draft_json, published_json, is_published, storage_used_bytes, images_count, updated_at, created_at FROM profiles WHERE user_id = ?').bind(user.id).first<ProfileRow>();
+  const clash = await env.DB.prepare('SELECT id FROM profiles WHERE (slug = ? OR draft_slug = ?) AND user_id != ? AND tenant_id = (SELECT tenant_id FROM users WHERE id = ?)').bind(slug, slug, user.id, user.id).first<{ id: string }>();
   if (clash) return responseJson({ ok: false, error: RESERVED_SLUGS.has(slug) ? 'reserved_slug' : 'slug_taken' }, 409);
   const mediaIds = existing ? await selectedMediaIds(env, existing, user.name) : [];
   const data = snapshotJson(profileDraft(input.data, user.name), mediaIds); const now = Date.now(); let profileId = existing?.id;
   try {
-    if (existing) await env.DB.prepare('UPDATE profiles SET slug = ?, draft_json = ?, updated_at = ? WHERE id = ? AND user_id = ?').bind(slug, data, now, existing.id, user.id).run();
+    if (existing) await env.DB.prepare('UPDATE profiles SET draft_slug = ?, draft_json = ?, updated_at = ? WHERE id = ? AND user_id = ?').bind(slug, data, now, existing.id, user.id).run();
     else {
       const owner = await env.DB.prepare('SELECT tenant_id FROM users WHERE id = ?').bind(user.id).first<{ tenant_id: string }>();
       if (!owner) return responseJson({ ok: false, error: 'unauthorized' }, 401);
@@ -270,6 +359,7 @@ async function saveAccountProfile(request: Request, env: Env) {
       await env.DB.prepare('INSERT INTO profiles (id, user_id, tenant_id, slug, is_published, published_version_id, draft_json, published_json, allow_search_indexing, active_days_balance, featured_until, storage_used_bytes, images_count, updated_at, created_at) VALUES (?, ?, ?, ?, 0, NULL, ?, NULL, 1, 0, NULL, 0, 0, ?, ?)').bind(profileId, user.id, owner.tenant_id, slug, data, now, now).run();
     }
   } catch { return responseJson({ ok: false, error: 'slug_taken' }, 409); }
+  if (existing) { const next = profileDraft(input.data, user.name); const edits: D1PreparedStatement[] = []; for (const flag of ['showEmail','showPhone','showWhatsapp'] as const) if (!next[flag]) edits.push(env.DB.prepare("UPDATE profiles SET published_json = json_set(published_json, ?, json('false')) WHERE id = ? AND published_json IS NOT NULL").bind(`$.${flag}`,existing.id)); if (edits.length) await env.DB.batch(edits); }
   await env.DB.prepare('INSERT INTO audit_logs (id, tenant_id, actor_id, action, target_type, target_id, details_json, ip_hash, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)').bind(crypto.randomUUID(), existing?.tenant_id ?? 'tenant_main', user.id, 'profile_draft_saved', 'profile', profileId ?? user.id, JSON.stringify({ slug }), toBase64(await digest(request.headers.get('CF-Connecting-IP') ?? 'unknown')), now).run();
   return responseJson({ ok: true, profile: await accountProfileData(env, user) });
 }
@@ -279,7 +369,7 @@ async function uploadProfileMedia(request: Request, env: Env) {
   const user = await authUser(request, env); if (!user) return responseJson({ ok: false, error: 'unauthorized' }, 401);
   const form = await request.formData().catch(() => null); const category = form?.get('category'); const file = form?.get('file');
   if (!isCategory(category) || !(file instanceof File) || file.type !== 'image/webp') return responseJson({ ok: false, error: 'invalid_image' }, 400);
-  const profile = await env.DB.prepare('SELECT id, user_id, tenant_id, slug, draft_json, published_json, is_published, storage_used_bytes, images_count, updated_at, created_at FROM profiles WHERE user_id = ?').bind(user.id).first<ProfileRow>();
+  const profile = await env.DB.prepare('SELECT id, user_id, tenant_id, slug, draft_slug, published_contact_json, privacy_hidden, draft_json, published_json, is_published, storage_used_bytes, images_count, updated_at, created_at FROM profiles WHERE user_id = ?').bind(user.id).first<ProfileRow>();
   if (!profile) return responseJson({ ok: false, error: 'profile_required' }, 400);
   const pending = await env.DB.prepare("SELECT id FROM publish_requests WHERE profile_id = ? AND status = 'pending' LIMIT 1").bind(profile.id).first<{ id: string }>();
   if (pending) return responseJson({ ok: false, error: 'media_under_review' }, 409);
@@ -311,7 +401,7 @@ async function uploadProfileMedia(request: Request, env: Env) {
 async function deleteProfileMedia(request: Request, env: Env, id: string) {
   if (!sameOrigin(request)) return responseJson({ ok: false, error: 'invalid_request' }, 403);
   const user = await authUser(request, env); if (!user) return responseJson({ ok: false, error: 'unauthorized' }, 401);
-  const profile = await env.DB.prepare('SELECT id, user_id, tenant_id, slug, draft_json, published_json, is_published, storage_used_bytes, images_count, updated_at, created_at FROM profiles WHERE user_id = ?').bind(user.id).first<ProfileRow>();
+  const profile = await env.DB.prepare('SELECT id, user_id, tenant_id, slug, draft_slug, published_contact_json, privacy_hidden, draft_json, published_json, is_published, storage_used_bytes, images_count, updated_at, created_at FROM profiles WHERE user_id = ?').bind(user.id).first<ProfileRow>();
   if (!profile) return responseJson({ ok: false, error: 'not_found' }, 404);
   const media = await env.DB.prepare('SELECT id, category, r2_key, size_bytes, created_at FROM media_assets WHERE id = ? AND profile_id = ? AND user_id = ?').bind(id, profile.id, user.id).first<MediaRow>();
   if (!media) return responseJson({ ok: false, error: 'not_found' }, 404);
@@ -327,24 +417,25 @@ async function deleteProfileMedia(request: Request, env: Env, id: string) {
 }
 
 async function mediaAsset(request: Request, env: Env, id: string) {
-  const media = await env.DB.prepare('SELECT m.r2_key, m.user_id, p.is_published, p.published_json, u.name FROM media_assets m JOIN profiles p ON p.id = m.profile_id JOIN users u ON u.id = m.user_id WHERE m.id = ?').bind(id).first<{ r2_key: string; user_id: string; is_published: number; published_json: string | null; name: string }>();
+  const media = await env.DB.prepare('SELECT m.r2_key, m.user_id, p.is_published, p.privacy_hidden, p.tenant_id, p.published_json, u.name FROM media_assets m JOIN profiles p ON p.id = m.profile_id JOIN users u ON u.id = m.user_id WHERE m.id = ?').bind(id).first<{ r2_key: string; user_id: string; is_published: number; privacy_hidden: number; tenant_id: string; published_json: string | null; name: string }>();
   if (!media) return new Response('Not Found', { status: 404, headers: securityHeaders });
-  const published = media.is_published === 1 && snapshotOf(media.published_json, media.name).mediaIds.includes(id);
+  const published = media.is_published === 1 && media.privacy_hidden === 0 && snapshotOf(media.published_json, media.name).mediaIds.includes(id);
   if (!published) {
     const viewer = await authUser(request, env);
-    if (!viewer || (viewer.id !== media.user_id && viewer.role !== 'super_admin')) return new Response('Forbidden', { status: 403, headers: { ...securityHeaders, 'cache-control': 'private, no-cache, no-store', vary: 'Cookie' } });
+    let reviewerAccess = false; if (viewer && ['moderator','adheed'].includes(viewer.role) && await canManageTenant(env, viewer, media.tenant_id) && await adminMfaVerified(request, env, viewer.id)) { const pending = await env.DB.prepare("SELECT submitted_payload_json FROM publish_requests WHERE user_id = ? AND status = 'pending'").bind(media.user_id).all<{submitted_payload_json:string}>(); reviewerAccess = (pending.results ?? []).some(r => snapshotOf(r.submitted_payload_json, media.name).mediaIds.includes(id)); }
+    if (!viewer || (viewer.id !== media.user_id && !(viewer.role === 'super_admin' && await adminMfaVerified(request, env, viewer.id)) && !reviewerAccess)) return new Response('Forbidden', { status: 403, headers: { ...securityHeaders, 'cache-control': 'private, no-cache, no-store', vary: 'Cookie' } });
   }
   const object = await env.MEDIA.get(media.r2_key);
   if (!object) return new Response('Not Found', { status: 404, headers: securityHeaders });
-  return secure(new Response(object.body, { headers: { 'content-type': object.httpMetadata?.contentType ?? 'image/webp', 'content-length': String(object.size), 'cache-control': published ? 'public, max-age=31536000, immutable' : 'private, no-cache, no-store', ...(published ? {} : { vary: 'Cookie' }) } }));
+  return secure(new Response(object.body, { headers: { 'content-type': object.httpMetadata?.contentType ?? 'image/webp', 'content-length': String(object.size), 'cache-control': published ? 'public, max-age=0, must-revalidate' : 'private, no-cache, no-store', ...(published ? {} : { vary: 'Cookie' }) } }));
 }
 
 async function publicProfile(request: Request, env: Env, slug: string) {
   const tenant = await tenantForRequest(request, env); if (!tenant) return responseJson({ ok: false, error: 'not_found' }, 404);
-  const profile = await env.DB.prepare("SELECT p.id, p.user_id, p.tenant_id, p.slug, p.draft_json, p.published_json, p.is_published, p.storage_used_bytes, p.images_count, p.updated_at, p.created_at, u.name, u.email, u.phone, u.whatsapp FROM profiles p JOIN users u ON u.id = p.user_id WHERE p.slug = ? AND p.tenant_id = ? AND p.is_published = 1 AND p.published_json IS NOT NULL AND u.status = 'active'").bind(slug, tenant.id).first<ProfileRow & { name: string; email: string; phone: string | null; whatsapp: string | null }>();
+  const profile = await env.DB.prepare("SELECT p.id, p.user_id, p.tenant_id, p.slug, p.draft_slug, p.published_contact_json, p.privacy_hidden, p.draft_json, p.published_json, p.is_published, p.storage_used_bytes, p.images_count, p.updated_at, p.created_at, u.name, u.email, u.phone, u.whatsapp FROM profiles p JOIN users u ON u.id = p.user_id WHERE p.slug = ? AND p.tenant_id = ? AND p.is_published = 1 AND p.privacy_hidden = 0 AND p.published_json IS NOT NULL AND u.status = 'active'").bind(slug, tenant.id).first<ProfileRow & { name: string; email: string; phone: string | null; whatsapp: string | null }>();
   if (!profile) return responseJson({ ok: false, error: 'not_found' }, 404);
-  const snapshot = snapshotOf(profile.published_json, profile.name); const all = await allProfileMedia(env, profile.id); const media = snapshot.hasMediaSelection ? all.filter((item) => snapshot.mediaIds.includes(item.id)) : all;
-  return responseJson({ ok: true, profile: { slug: profile.slug, data: snapshot.data, media: media.map(mediaView), contact: { email: snapshot.data.showEmail ? profile.email : '', phone: snapshot.data.showPhone ? profile.phone ?? '' : '', whatsapp: snapshot.data.showWhatsapp ? profile.whatsapp ?? '' : '' } } });
+  const snapshot = snapshotOf(profile.published_json, profile.name); const contact = record(JSON.parse(profile.published_contact_json ?? '{}')); const all = await allProfileMedia(env, profile.id); const media = snapshot.hasMediaSelection ? all.filter((item) => snapshot.mediaIds.includes(item.id)) : all;
+  return responseJson({ ok: true, profile: { slug: profile.slug, data: snapshot.data, media: media.map(mediaView), contact: { email: snapshot.data.showEmail && typeof contact.email === 'string' ? contact.email : '', phone: snapshot.data.showPhone && typeof contact.phone === 'string' ? contact.phone : '', whatsapp: snapshot.data.showWhatsapp && typeof contact.whatsapp === 'string' ? contact.whatsapp : '' } } });
 }
 
 const publicationMail = {
@@ -366,17 +457,27 @@ async function sendPublicationDecision(env: Env, email: string, locale: Locale, 
   return response.ok;
 }
 
+async function deliverOutbox(env: Env, id: string) {
+  const now=Date.now();const row=await env.DB.prepare("UPDATE delivery_outbox SET status='sending',attempts=attempts+1,lease_until=? WHERE id=? AND (status='pending' OR (status='sending' AND lease_until<?)) AND next_attempt_at<=? AND attempts<8 AND created_at>? RETURNING kind,payload_cipher,attempts").bind(now+120000,id,now,now,now-23*60*60*1000).first<{kind:string;payload_cipher:string;attempts:number}>();
+  if(!row)return Boolean(await env.DB.prepare("SELECT 1 FROM delivery_outbox WHERE id=? AND status='sent'").bind(id).first());
+  let delivered=false;
+  try{const p=JSON.parse(await openBox(row.payload_cipher,env.DATA_ENCRYPTION_KEY));if(row.kind==='publication')delivered=await sendPublicationDecision(env,p.email,p.locale,p.decision,p.note,p.requestId);else if(row.kind==='custody')delivered=await sendCustodyInvitation(env,p.recipient,p.token,p.locale,p.subject);else if(row.kind==='incident'||row.kind==='privacy'){const response=await mailer(env).fetch(new Request('https://mailer/v1/support/send',{method:'POST',headers:{'content-type':'application/json','idempotency-key':id},body:JSON.stringify(p)}));delivered=response.ok;}}catch{delivered=false;}
+  await env.DB.prepare('UPDATE delivery_outbox SET status=?,sent_at=?,next_attempt_at=?,lease_until=NULL,last_error=? WHERE id=?').bind(delivered?'sent':row.attempts>=8?'failed':'pending',delivered?Date.now():null,Date.now()+Math.min(60*60*1000,60000*(2**row.attempts)),delivered?null:'delivery_not_confirmed',id).run();
+  return delivered;
+}
+
 async function submitPublication(request: Request, env: Env) {
   if (!sameOrigin(request)) return responseJson({ ok: false, error: 'invalid_request' }, 403);
   const user = await authUser(request, env); if (!user) return responseJson({ ok: false, error: 'unauthorized' }, 401);
   const input = record(await request.json().catch(() => ({}))); const locale = localeOf(input.locale);
-  const profile = await env.DB.prepare('SELECT id, user_id, tenant_id, slug, draft_json, published_json, is_published, storage_used_bytes, images_count, updated_at, created_at FROM profiles WHERE user_id = ?').bind(user.id).first<ProfileRow>();
+  const profile = await env.DB.prepare('SELECT id, user_id, tenant_id, slug, draft_slug, published_contact_json, privacy_hidden, draft_json, published_json, is_published, storage_used_bytes, images_count, updated_at, created_at FROM profiles WHERE user_id = ?').bind(user.id).first<ProfileRow>();
   if (!profile) return responseJson({ ok: false, error: 'profile_required' }, 400);
   const pending = await env.DB.prepare("SELECT id FROM publish_requests WHERE profile_id = ? AND status = 'pending' LIMIT 1").bind(profile.id).first<{ id: string }>();
   if (pending) return responseJson({ ok: false, error: 'request_pending' }, 409);
+  const submittedSlug = profile.draft_slug ?? profile.slug; const contact = await env.DB.prepare('SELECT email,phone,whatsapp FROM users WHERE id = ?').bind(user.id).first<ContactRow>();
   const mediaIds = await selectedMediaIds(env, profile, user.name); const snapshot = snapshotJson(snapshotOf(profile.draft_json, user.name).data, mediaIds); const id = `publish_${crypto.randomUUID()}`; const now = Date.now();
   await env.DB.batch([
-    env.DB.prepare('INSERT INTO publish_requests (id, profile_id, user_id, tenant_id, submitted_payload_json, status, reviewer_id, review_note, submission_locale, submitted_at, reviewed_at) VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?, NULL)').bind(id, profile.id, user.id, profile.tenant_id, snapshot, 'pending', locale, now),
+    env.DB.prepare('INSERT INTO publish_requests (id, profile_id, user_id, tenant_id, submitted_payload_json, status, reviewer_id, review_note, submission_locale, submitted_at, reviewed_at, submitted_slug, submitted_contact_json) VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?, NULL, ?, ?)').bind(id, profile.id, user.id, profile.tenant_id, snapshot, 'pending', locale, now, submittedSlug, JSON.stringify(contact ?? {})),
     env.DB.prepare('INSERT INTO audit_logs (id, tenant_id, actor_id, action, target_type, target_id, details_json, ip_hash, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)').bind(crypto.randomUUID(), profile.tenant_id, user.id, profile.is_published ? 'publication_update_submitted' : 'publication_initial_submitted', 'publish_request', id, JSON.stringify({ slug: profile.slug, mediaCount: mediaIds.length }), toBase64(await digest(request.headers.get('CF-Connecting-IP') ?? 'unknown')), now)
   ]);
   return responseJson({ ok: true, profile: await accountProfileData(env, user) }, 202);
@@ -385,39 +486,56 @@ async function submitPublication(request: Request, env: Env) {
 async function accountNotifications(request: Request, env: Env) { const user = await authUser(request, env); if (!user) return responseJson({ ok: false, error: 'unauthorized' }, 401); const entries = (await env.DB.prepare('SELECT id, kind, title, message, created_at FROM notifications WHERE user_id = ? ORDER BY created_at DESC LIMIT 12').bind(user.id).all<NotificationRow>()).results ?? []; return responseJson({ ok: true, notifications: entries.map((item) => ({ id: item.id, kind: item.kind, title: item.title, message: item.message, createdAt: item.created_at })) }); }
 
 async function adminPublishRequests(request: Request, env: Env) {
-  const reviewer = await authUser(request, env); if (!reviewer) return responseJson({ ok: false, error: 'unauthorized' }, 401); if (reviewer.role !== 'super_admin') return responseJson({ ok: false, error: 'forbidden' }, 403);
-  const entries = (await env.DB.prepare("SELECT r.id, r.status, r.review_note, r.submitted_at, r.reviewed_at, r.submitted_payload_json, r.submission_locale, p.slug, u.name AS owner_name, u.email AS owner_email FROM publish_requests r JOIN profiles p ON p.id = r.profile_id JOIN users u ON u.id = r.user_id WHERE r.status = 'pending' ORDER BY r.submitted_at ASC LIMIT 50").all<ReviewRequestRow>()).results ?? [];
-  return responseJson({ ok: true, requests: entries.map((item) => ({ id: item.id, status: item.status, reviewNote: item.review_note, submittedAt: item.submitted_at, slug: item.slug, ownerName: item.owner_name, ownerEmail: item.owner_email, submissionLocale: item.submission_locale, snapshot: (() => { const snapshot = snapshotOf(item.submitted_payload_json, item.owner_name); return { data: snapshot.data, mediaIds: snapshot.mediaIds }; })() })) });
+  const reviewer=await authUser(request,env);if(!reviewer)return responseJson({ok:false,error:'unauthorized'},401);if(!['super_admin','moderator','adheed'].includes(reviewer.role))return responseJson({ok:false,error:'forbidden'},403);
+  const rows=await env.DB.prepare(`SELECT r.*,p.slug,u.name AS owner_name,u.email AS owner_email FROM publish_requests r JOIN profiles p ON p.id=r.profile_id JOIN users u ON u.id=r.user_id WHERE r.status='pending' ORDER BY r.submitted_at LIMIT 100`).all<ReviewRequestRow & {tenant_id:string}>();
+  const items=[];for(const r of rows.results??[])if(await canManageTenant(env,reviewer,r.tenant_id)){const snap=snapshotOf(r.submitted_payload_json,r.owner_name);items.push({id:r.id,status:r.status,reviewNote:r.review_note,submittedAt:r.submitted_at,slug:r.submitted_slug??r.slug,ownerName:r.owner_name,submissionLocale:r.submission_locale,snapshot:{data:snap.data,mediaIds:snap.mediaIds}});}
+  return responseJson({ok:true,requests:items});
+}
+async function reviewPreview(request: Request, env: Env, requestId: string) {
+  const actor=await authUser(request,env);if(!actor)return responseJson({ok:false,error:'unauthorized'},401);
+  const r=await env.DB.prepare('SELECT r.*,p.slug,u.name AS owner_name FROM publish_requests r JOIN profiles p ON p.id=r.profile_id JOIN users u ON u.id=r.user_id WHERE r.id=?').bind(requestId).first<ReviewRequestRow & {tenant_id:string;profile_id:string}>();
+  if(!r)return responseJson({ok:false,error:'not_found'},404);if(!(await canManageTenant(env,actor,r.tenant_id)))return responseJson({ok:false,error:'forbidden'},403);
+  const snapshot=snapshotOf(r.submitted_payload_json,r.owner_name);const all=await allProfileMedia(env,r.profile_id);const contact=record(JSON.parse(r.submitted_contact_json??'{}'));
+  await auditSovereignty(env,request,actor.id,r.tenant_id,'publication_previewed','publish_request',requestId,{});
+  return responseJson({ok:true,profile:{slug:r.submitted_slug??r.slug,data:snapshot.data,media:all.filter(m=>snapshot.mediaIds.includes(m.id)).map(mediaView),contact:{email:snapshot.data.showEmail?contact.email??'':'',phone:snapshot.data.showPhone?contact.phone??'':'',whatsapp:snapshot.data.showWhatsapp?contact.whatsapp??'':''}}});
 }
 
 async function decidePublication(request: Request, env: Env, requestId: string) {
-  if (!sameOrigin(request)) return responseJson({ ok: false, error: 'invalid_request' }, 403);
-  const reviewer = await authUser(request, env); if (!reviewer) return responseJson({ ok: false, error: 'unauthorized' }, 401); if (reviewer.role !== 'super_admin' && reviewer.role !== 'moderator' && reviewer.role !== 'adheed') return responseJson({ ok: false, error: 'forbidden' }, 403);
-  const input = record(await request.json().catch(() => ({}))); const decision = input.decision; const note = textOf(input.note, 800);
-  if (decision !== 'approved' && decision !== 'changes_requested' && decision !== 'rejected') return responseJson({ ok: false, error: 'invalid_request' }, 400);
-  if (decision !== 'approved' && !note) return responseJson({ ok: false, error: 'reason_required' }, 400);
-  const recordRequest = await env.DB.prepare("SELECT r.id, r.profile_id, r.user_id, r.tenant_id, r.status, r.review_note, r.submitted_at, r.reviewed_at, r.submitted_payload_json, r.submission_locale, p.slug, u.name AS owner_name, u.email AS owner_email FROM publish_requests r JOIN profiles p ON p.id = r.profile_id JOIN users u ON u.id = r.user_id WHERE r.id = ?").bind(requestId).first<ReviewRequestRow & { profile_id: string; user_id: string; tenant_id: string }>();
-  if (!recordRequest) return responseJson({ ok: false, error: 'not_found' }, 404); if (!(await canManageTenant(env, reviewer, recordRequest.tenant_id))) return responseJson({ ok: false, error: 'forbidden' }, 403); if (recordRequest.status !== 'pending') return responseJson({ ok: false, error: 'decision_recorded' }, 409);
-  const now = Date.now(); const changed = await env.DB.prepare("UPDATE publish_requests SET status = ?, reviewer_id = ?, review_note = ?, reviewed_at = ? WHERE id = ? AND status = 'pending'").bind(decision, reviewer.id, note || null, now, requestId).run();
-  if (!changed.meta.changes) return responseJson({ ok: false, error: 'decision_recorded' }, 409);
-  if (decision === 'approved') {
-    const profileBefore = await env.DB.prepare('SELECT is_published FROM profiles WHERE id = ?').bind(recordRequest.profile_id).first<{ is_published: number }>();
-    await env.DB.prepare('UPDATE profiles SET published_json = ?, published_version_id = ?, is_published = 1, updated_at = ? WHERE id = ?').bind(recordRequest.submitted_payload_json, recordRequest.id, now, recordRequest.profile_id).run();
-    if (!profileBefore?.is_published) {
-      await awardFromTreasury(env, recordRequest.user_id, FIRST_PUBLICATION_REWARD, 'first_publication_bonus', `first-publication:${recordRequest.user_id}`, reviewer.id, { requestId });
-      const referral = await env.DB.prepare('SELECT referred_by_permanent_id FROM users WHERE id = ?').bind(recordRequest.user_id).first<{ referred_by_permanent_id: string | null }>();
-      if (referral?.referred_by_permanent_id) { const referrer = await activeUserByPermanentId(env, referral.referred_by_permanent_id); if (referrer && referrer.id !== recordRequest.user_id) await awardFromTreasury(env, referrer.id, FIRST_PUBLICATION_REWARD, 'referral_first_publication_bonus', `referral-first-publication:${recordRequest.user_id}`, reviewer.id, { referredUserId: recordRequest.user_id, requestId }); }
+  if (!sameOrigin(request)) return responseJson({ ok:false,error:'invalid_request' },403);
+  const reviewer=await authUser(request,env); if (!reviewer) return responseJson({ok:false,error:'unauthorized'},401);
+  if (!['super_admin','moderator','adheed'].includes(reviewer.role)) return responseJson({ok:false,error:'forbidden'},403);
+  const input=record(await request.json().catch(()=>({}))); const decision=input.decision; const note=textOf(input.note,800);
+  if (!['approved','changes_requested','rejected'].includes(String(decision))) return responseJson({ok:false,error:'invalid_input'},400);
+  if (decision !== 'approved' && note.replace(/[—\-\s]/g,'').length < 2) return responseJson({ok:false,error:'reason_required'},400);
+  const r=await env.DB.prepare(`SELECT r.*,p.slug,u.name AS owner_name,u.email AS owner_email FROM publish_requests r
+    JOIN profiles p ON p.id=r.profile_id JOIN users u ON u.id=r.user_id WHERE r.id=?`).bind(requestId).first<ReviewRequestRow & {profile_id:string;user_id:string;tenant_id:string}>();
+  if (!r) return responseJson({ok:false,error:'not_found'},404);
+  if (!(await canManageTenant(env,reviewer,r.tenant_id))) return responseJson({ok:false,error:'forbidden'},403);
+  const operation=`publication-decision:${requestId}`; const hash=await fingerprint([reviewer.id,decision,note]);
+  const previous=await recordedOperation(env.DB,operation,reviewer.id,hash);
+  if (previous==='same') return responseJson({ok:true,alreadyProcessed:true});
+  if (previous==='conflict' || r.status!=='pending') return responseJson({ok:false,error:'decision_recorded'},409);
+  const now=Date.now(); const approved=decision==='approved'; const message=publicationMail[r.submission_locale][decision as 'approved'|'changes_requested'|'rejected'];
+  const before=await env.DB.prepare('SELECT is_published FROM profiles WHERE id=?').bind(r.profile_id).first<{is_published:number}>();
+  const commands=[claimStatement(env.DB,operation,reviewer.id,hash,"EXISTS(SELECT 1 FROM publish_requests WHERE id=? AND status='pending')",[requestId]),
+    env.DB.prepare('UPDATE publish_requests SET status=?,reviewer_id=?,review_note=?,reviewed_at=? WHERE id=?').bind(String(decision),reviewer.id,note||null,now,requestId)];
+  if (approved) {
+    const contact=r.submitted_contact_json ?? JSON.stringify(await env.DB.prepare('SELECT email,phone,whatsapp FROM users WHERE id=?').bind(r.user_id).first() ?? {});
+    commands.push(env.DB.prepare('UPDATE profiles SET slug=?,published_json=?,published_contact_json=?,published_version_id=?,is_published=1,updated_at=? WHERE id=? AND privacy_hidden=0').bind(r.submitted_slug ?? r.slug,r.submitted_payload_json,contact,r.id,now,r.profile_id));
+    commands.push(claimStatement(env.DB,`publication-active:${r.id}`,reviewer.id,hash,"EXISTS(SELECT 1 FROM profiles WHERE id=? AND privacy_hidden=0 AND published_version_id=?)",[r.profile_id,r.id]));
+    if (!before?.is_published) {
+      commands.push(...await awardStatements(env,r.user_id,FIRST_PUBLICATION_REWARD,'first_publication_bonus',`first-publication:${r.user_id}`,reviewer.id,{requestId}));
+      const referral=await env.DB.prepare('SELECT referred_by_permanent_id FROM users WHERE id=?').bind(r.user_id).first<{referred_by_permanent_id:string|null}>();
+      if (referral?.referred_by_permanent_id) { const referrer=await activeUserByPermanentId(env,referral.referred_by_permanent_id); if(referrer&&referrer.id!==r.user_id) commands.push(...await awardStatements(env,referrer.id,FIRST_PUBLICATION_REWARD,'referral_first_publication_bonus',`referral-first-publication:${r.user_id}`,reviewer.id,{referredUserId:r.user_id,requestId})); }
     }
   }
-  const message = publicationMail[recordRequest.submission_locale][decision]; const notificationKind = `publication_${decision}` as NotificationRow['kind'];
-  await env.DB.batch([
-    env.DB.prepare('INSERT INTO notifications (id, user_id, request_id, kind, locale, title, message, is_read, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?)').bind(`notice_${crypto.randomUUID()}`, recordRequest.user_id, requestId, notificationKind, recordRequest.submission_locale, message.title, note ? `${message.text}\n\n${recordRequest.submission_locale === 'ar' ? 'ملاحظة المشرف:' : 'Reviewer note:'}\n${note}` : message.text, now),
-    env.DB.prepare('INSERT INTO audit_logs (id, tenant_id, actor_id, action, target_type, target_id, details_json, ip_hash, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)').bind(crypto.randomUUID(), recordRequest.tenant_id, reviewer.id, `publication_${decision}`, 'publish_request', requestId, JSON.stringify({ slug: recordRequest.slug, reviewedAt: now }), toBase64(await digest(request.headers.get('CF-Connecting-IP') ?? 'unknown')), now)
-  ]);
-  if (decision === 'approved') { const profile = await env.DB.prepare('SELECT id, user_id, tenant_id, slug, draft_json, published_json, is_published, storage_used_bytes, images_count, updated_at, created_at FROM profiles WHERE id = ?').bind(recordRequest.profile_id).first<ProfileRow>(); if (profile) await cleanUnusedMedia(env, profile, recordRequest.owner_name); }
-  const delivered = await sendPublicationDecision(env, recordRequest.owner_email, recordRequest.submission_locale, decision, note, requestId).catch(() => false);
-  await env.DB.prepare('INSERT INTO audit_logs (id, tenant_id, actor_id, action, target_type, target_id, details_json, ip_hash, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)').bind(crypto.randomUUID(), recordRequest.tenant_id, reviewer.id, 'publication_decision_notification', 'publish_request', requestId, JSON.stringify({ delivered }), toBase64(await digest(request.headers.get('CF-Connecting-IP') ?? 'unknown')), Date.now()).run();
-  return responseJson({ ok: true, delivered });
+  const mailCipher=await secretBox(JSON.stringify({email:r.owner_email,locale:r.submission_locale,decision,note,requestId}),env.DATA_ENCRYPTION_KEY);
+  commands.push(env.DB.prepare('INSERT INTO notifications(id,user_id,request_id,kind,locale,title,message,is_read,created_at) VALUES (?,?,?,?,?,?,?,0,?)').bind(`notice_${crypto.randomUUID()}`,r.user_id,r.id,`publication_${decision}`,r.submission_locale,message.title,note?`${message.text}\n\n${note}`:message.text,now),
+    env.DB.prepare('INSERT INTO delivery_outbox(id,user_id,kind,payload_cipher,status,next_attempt_at,created_at) VALUES (?,?,?,?,?,?,?)').bind(`publication:${requestId}`,r.user_id,'publication',mailCipher,'pending',now,now),
+    env.DB.prepare('INSERT INTO audit_logs(id,tenant_id,actor_id,action,target_type,target_id,details_json,created_at) VALUES (?,?,?,?,?,?,?,?)').bind(crypto.randomUUID(),r.tenant_id,reviewer.id,`publication_${decision}`,'publish_request',requestId,JSON.stringify({slug:r.submitted_slug??r.slug}),now));
+  try { await env.DB.batch(commands); } catch { const after=await recordedOperation(env.DB,operation,reviewer.id,hash); return responseJson(after==='same'?{ok:true,alreadyProcessed:true}:{ok:false,error:'decision_unavailable'},after==='same'?200:409); }
+  const delivered=await deliverOutbox(env,`publication:${requestId}`).catch(()=>false);
+  return responseJson({ok:true,delivered});
 }
 
 async function deletePublicationRequest(request: Request, env: Env, requestId: string) {
@@ -437,7 +555,7 @@ async function confirmGift(request: Request, env: Env) {
   const user = await authUser(request, env); if (!user) return responseJson({ ok: false, error: 'unauthorized' }, 401);
   const input = record(await request.json().catch(() => ({}))); const recipient = textOf(input.recipient, 120); const link = validGiftLink(input.link); const idempotencyKey = idempotencyOf(input.idempotencyKey, 'gift');
   if (!recipient || !link || !idempotencyKey) return responseJson({ ok: false, error: 'invalid_input' }, 400);
-  const outcome = await debitToTreasury(env, user.id, DAY_REDEMPTION_COST, 'gift_qr', idempotencyKey, { service: 'client_side_qr_gift' });
+  const outcome = await debitToTreasury(env, user.id, DAY_REDEMPTION_COST, 'gift_qr', idempotencyKey, { service: 'client_side_qr_gift', recipient, link });
   if (!outcome.ok) return responseJson({ ok: false, error: outcome.error }, 409);
   if (!outcome.idempotent) await env.DB.prepare('INSERT INTO audit_logs (id, tenant_id, actor_id, action, target_type, target_id, details_json, ip_hash, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)').bind(crypto.randomUUID(), 'tenant_main', user.id, 'gift_qr_confirmed', 'ledger_entry', idempotencyKey, JSON.stringify({ amount: DAY_REDEMPTION_COST }), toBase64(await digest(request.headers.get('CF-Connecting-IP') ?? 'unknown')), Date.now()).run();
   const current = await activeUserById(env, user.id);
@@ -497,15 +615,19 @@ async function adminWalletOverview(request: Request, env: Env) {
 }
 
 async function decidePointGrant(request: Request, env: Env, grantId: string) {
-  if (!sameOrigin(request)) return responseJson({ ok: false, error: 'invalid_request' }, 403);
-  const admin = await authUser(request, env); if (!admin) return responseJson({ ok: false, error: 'unauthorized' }, 401); if (admin.role !== 'super_admin') return responseJson({ ok: false, error: 'forbidden' }, 403);
-  const input = record(await request.json().catch(() => ({}))); if (!(await requireStepUpPin(env, admin, input.stepUpPin))) return responseJson({ ok: false, error: 'step_up_required' }, 401);
-  const decision = input.decision === 'approved' ? 'approved' : input.decision === 'rejected' ? 'rejected' : null; const note = textOf(input.note, 800); const amount = pointAmountOf(input.amount); const category = grantCategoryOf(input.category);
-  if (!decision || !note || (decision === 'approved' && (!amount || !category))) return responseJson({ ok: false, error: 'invalid_input' }, 400);
-  const grant = await env.DB.prepare("SELECT id, user_id, tenant_id FROM point_grant_requests WHERE id = ? AND status = 'pending'").bind(grantId).first<{ id: string; user_id: string; tenant_id: string }>(); if (!grant) return responseJson({ ok: false, error: 'not_found' }, 404);
-  if (decision === 'approved') { const outcome = await awardFromTreasury(env, grant.user_id, amount!, 'admin_grant', `grant-request:${grant.id}`, admin.id, { category, grantRequestId: grant.id }); if (!outcome.ok) return responseJson({ ok: false, error: outcome.error }, 409); }
-  const now = Date.now(); const changed = await env.DB.prepare("UPDATE point_grant_requests SET status = ?, grant_category = ?, awarded_amount = ?, reviewer_id = ?, reviewer_reason = ?, reviewed_at = ? WHERE id = ? AND status = 'pending'").bind(decision, decision === 'approved' ? category : null, decision === 'approved' ? amount : null, admin.id, note, now, grant.id).run(); if (!changed.meta.changes) return responseJson({ ok: false, error: 'decision_recorded' }, 409);
-  return responseJson({ ok: true });
+  if (!sameOrigin(request)) return responseJson({ok:false,error:'invalid_request'},403);
+  const admin=await authUser(request,env); if(!admin)return responseJson({ok:false,error:'unauthorized'},401);if(admin.role!=='super_admin')return responseJson({ok:false,error:'forbidden'},403);
+  const input=record(await request.json().catch(()=>({})));if(!(await requireStepUpPin(env,admin,input.stepUpPin)))return responseJson({ok:false,error:'step_up_required'},401);
+  const decision=input.decision==='approved'?'approved':input.decision==='rejected'?'rejected':null;const note=textOf(input.note,800);const amount=pointAmountOf(input.amount);const category=grantCategoryOf(input.category);
+  if(!decision||!note||(decision==='approved'&&(!amount||!category)))return responseJson({ok:false,error:'invalid_input'},400);
+  const g=await env.DB.prepare('SELECT id,user_id,tenant_id,status FROM point_grant_requests WHERE id=?').bind(grantId).first<{id:string;user_id:string;tenant_id:string;status:string}>();if(!g)return responseJson({ok:false,error:'not_found'},404);
+  const key=`grant-decision:${g.id}`;const hash=await fingerprint([admin.id,decision,decision==='approved'?amount:null,decision==='approved'?category:null,note]);const prior=await recordedOperation(env.DB,key,admin.id,hash);
+  if(prior==='same')return responseJson({ok:true,alreadyProcessed:true});if(prior==='conflict'||g.status!=='pending')return responseJson({ok:false,error:'decision_recorded'},409);
+  const now=Date.now();const commands=[claimStatement(env.DB,key,admin.id,hash,"EXISTS(SELECT 1 FROM point_grant_requests WHERE id=? AND status='pending')",[g.id]),
+    env.DB.prepare('UPDATE point_grant_requests SET status=?,grant_category=?,awarded_amount=?,reviewer_id=?,reviewer_reason=?,reviewed_at=? WHERE id=?').bind(decision,decision==='approved'?category:null,decision==='approved'?amount:null,admin.id,note,now,g.id)];
+  if(decision==='approved')commands.push(...await awardStatements(env,g.user_id,amount!,'admin_grant',`grant-request:${g.id}`,admin.id,{category,grantRequestId:g.id}));
+  commands.push(env.DB.prepare("INSERT INTO audit_logs(id,tenant_id,actor_id,action,target_type,target_id,details_json,created_at) VALUES (?,?,?,'point_grant_decided','point_grant_request',?,?,?)").bind(crypto.randomUUID(),g.tenant_id,admin.id,g.id,JSON.stringify({decision,amount:decision==='approved'?amount:null}),now));
+  try{await env.DB.batch(commands);return responseJson({ok:true});}catch{const after=await recordedOperation(env.DB,key,admin.id,hash);return responseJson(after==='same'?{ok:true,alreadyProcessed:true}:{ok:false,error:'decision_unavailable'},after==='same'?200:409);}
 }
 
 async function adminDirectGrant(request: Request, env: Env) {
@@ -522,6 +644,7 @@ async function adminDirectGrant(request: Request, env: Env) {
 type TenantRow = { id: string; slug: string; name_ar: string; name_en: string; logo_url: string | null; cover_url: string | null; status: 'pending' | 'active' | 'suspended'; tenant_type: 'main' | 'partner'; owner_user_id: string | null; assigned_moderator_id: string | null };
 function tenantSlugOf(value: unknown) { const valueText = typeof value === 'string' ? value.trim().toLowerCase() : ''; return /^[a-z0-9](?:[a-z0-9-]{1,30}[a-z0-9])$/.test(valueText) && !RESERVED_SLUGS.has(valueText) ? valueText : null; }
 async function tenantForHost(env: Env, host: string) {
+  if (env.ENVIRONMENT === 'staging' && host === env.STAGING_HOST) return env.DB.prepare("SELECT id,slug,name_ar,name_en,logo_url,cover_url,status,tenant_type,owner_user_id,assigned_moderator_id FROM tenants WHERE id='tenant_main'").first<TenantRow>();
   if (host === 'vipdid.app') return env.DB.prepare("SELECT id, slug, name_ar, name_en, logo_url, cover_url, status, tenant_type, owner_user_id, assigned_moderator_id FROM tenants WHERE id = 'tenant_main'").first<TenantRow>();
   const match = host.match(/^([a-z0-9-]+)\.vipdid\.app$/);
   if (match) return env.DB.prepare("SELECT id, slug, name_ar, name_en, logo_url, cover_url, status, tenant_type, owner_user_id, assigned_moderator_id FROM tenants WHERE slug = ? AND status = 'active' AND tenant_type = 'partner'").bind(match[1]).first<TenantRow>();
@@ -529,41 +652,96 @@ async function tenantForHost(env: Env, host: string) {
 }
 async function tenantForRequest(request: Request, env: Env) { return tenantForHost(env, hostnameForRequest(request)); }
 
-async function canManageTenant(env: Env, actor: UserRow, tenantId: string) { if (actor.role === 'super_admin') return true; const tenant = await env.DB.prepare('SELECT owner_user_id, assigned_moderator_id FROM tenants WHERE id = ?').bind(tenantId).first<{ owner_user_id: string | null; assigned_moderator_id: string | null }>(); return Boolean(tenant && ((actor.role === 'adheed' && tenant.owner_user_id === actor.id) || (actor.role === 'moderator' && tenant.assigned_moderator_id === actor.id))); }
+async function canManageTenant(env: Env, actor: UserRow, tenantId: string) {
+  if (actor.role === 'super_admin') return true;
+  if (actor.role === 'moderator') return Boolean(await env.DB.prepare('SELECT 1 FROM moderator_assignments WHERE user_id = ? AND tenant_id = ?').bind(actor.id, tenantId).first());
+  const tenant = await env.DB.prepare("SELECT owner_user_id FROM tenants WHERE id = ? AND status = 'active'").bind(tenantId).first<{owner_user_id:string|null}>();
+  return Boolean(tenant && actor.role === 'adheed' && tenant.owner_user_id === actor.id);
+}
+
 async function auditSovereignty(env: Env, request: Request, actorId: string, tenantId: string, action: string, targetType: string, targetId: string, details: Record<string, unknown> = {}) { await env.DB.prepare('INSERT INTO audit_logs (id, tenant_id, actor_id, action, target_type, target_id, details_json, ip_hash, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)').bind(crypto.randomUUID(), tenantId, actorId, action, targetType, targetId, JSON.stringify(details), toBase64(await digest(request.headers.get('CF-Connecting-IP') ?? 'unknown')), Date.now()).run(); }
 async function managedAccount(env: Env, request: Request, actor: UserRow, tenantId: string, nameValue: unknown, emailValue: unknown, slugValue: unknown, role: 'user' | 'moderator' | 'adheed') {
-  const name = textOf(nameValue, 120); const email = emailOf(emailValue); const slug = tenantSlugOf(slugValue); if (!name || !email || !slug) return null;
+  const name = textOf(nameValue, 120); const email = emailOf(emailValue); const slug = role === 'moderator' && !slugValue ? `mod-${crypto.randomUUID().slice(0,18)}` : tenantSlugOf(slugValue); if (!name || !email || !slug) return null;
   const tenant = await env.DB.prepare('SELECT id FROM tenants WHERE id = ?').bind(tenantId).first<{ id: string }>(); if (!tenant || !(await canManageTenant(env, actor, tenantId))) return null;
   const existing = await env.DB.prepare('SELECT id FROM users WHERE email = ?').bind(email).first<{ id: string }>(); const profile = await env.DB.prepare('SELECT id FROM profiles WHERE tenant_id = ? AND slug = ?').bind(tenantId, slug).first<{ id: string }>(); if (existing || profile) return null;
   let permanent: string; try { permanent = await allocatePermanentId(env); } catch { return null; }
   const now = Date.now(); const id = `user_${crypto.randomUUID()}`; const profileId = `profile_${crypto.randomUUID()}`; const draft = snapshotJson(profileDraft({}, name), []);
-  await env.DB.batch([env.DB.prepare('INSERT INTO users (id, permanent_id, tenant_id, name, email, phone, whatsapp, pin_hash, pin_salt, role, is_managed, managed_by_user_id, custody_transfer_email, custody_token_hash, custody_token_expires, referred_by_permanent_id, wallet_balance, status, failed_login_attempts, terms_accepted_at, privacy_accepted_at, eligibility_acknowledged_at, created_at) VALUES (?, ?, ?, ?, ?, NULL, NULL, NULL, NULL, ?, 1, ?, NULL, NULL, NULL, NULL, 0, ?, 0, ?, ?, ?, ?)').bind(id, permanent, tenantId, name, email, role, actor.id, 'pending_verification', now, now, now, now), env.DB.prepare('INSERT INTO profiles (id, user_id, tenant_id, slug, is_published, published_version_id, draft_json, published_json, allow_search_indexing, active_days_balance, featured_until, storage_used_bytes, images_count, updated_at, created_at) VALUES (?, ?, ?, ?, 0, NULL, ?, NULL, 1, 0, NULL, 0, 0, ?, ?)').bind(profileId, id, tenantId, slug, draft, now, now)]);
+  await env.DB.batch([env.DB.prepare('INSERT INTO users (id, permanent_id, tenant_id, name, email, phone, whatsapp, pin_hash, pin_salt, role, is_managed, managed_by_user_id, custody_transfer_email, custody_token_hash, custody_token_expires, referred_by_permanent_id, wallet_balance, status, failed_login_attempts, terms_accepted_at, privacy_accepted_at, eligibility_acknowledged_at, created_at) VALUES (?, ?, ?, ?, ?, NULL, NULL, NULL, NULL, ?, 1, ?, NULL, NULL, NULL, NULL, 0, ?, 0, ?, ?, ?, ?)').bind(id, permanent, tenantId, name, email, role, actor.id, 'pending_verification', 0, null, null, now), env.DB.prepare('INSERT INTO profiles (id, user_id, tenant_id, slug, is_published, published_version_id, draft_json, published_json, allow_search_indexing, active_days_balance, featured_until, storage_used_bytes, images_count, updated_at, created_at) VALUES (?, ?, ?, ?, 0, NULL, ?, NULL, 1, 0, NULL, 0, 0, ?, ?)').bind(profileId, id, tenantId, slug, draft, now, now)]);
   await auditSovereignty(env, request, actor.id, tenantId, 'managed_account_created', 'user', id, { role, permanentId: permanent, slug }); return { id, email, permanent, profileId };
 }
 
 async function sendCustodyInvitation(env: Env, recipient: string, rawToken: string, locale: Locale, subject: 'user' | 'tenant') { const link = `https://vipdid.app/accept-custody?custody=${encodeURIComponent(rawToken)}`; const arabic = locale === 'ar'; const heading = subject === 'tenant' ? (arabic ? 'دعوة تسليم عهدة العضيد' : 'Partner custody invitation') : (arabic ? 'دعوة تسليم عهدة الحساب' : 'Account custody invitation'); const text = arabic ? `${heading}\n\nأكمل الاستلام عبر الرابط الآمن التالي:\n${link}\n\nينتهي الرابط خلال 72 ساعة.` : `${heading}\n\nComplete the transfer through this secure link:\n${link}\n\nThis link expires in 72 hours.`; const response = await mailer(env).fetch(new Request('https://mailer/v1/support/send', { method: 'POST', headers: { 'content-type': 'application/json', 'idempotency-key': `vipdid-custody-${await hashed(rawToken)}` }, body: JSON.stringify({ to: recipient, subject: heading, text, html: `<div dir="${arabic ? 'rtl' : 'ltr'}" lang="${locale}"><h1>${htmlSafe(heading)}</h1><p>${htmlSafe(arabic ? 'أكمل الاستلام عبر الرابط الآمن:' : 'Complete the transfer through this secure link:')}</p><p><a href="${htmlSafe(link)}">${htmlSafe(link)}</a></p></div>` }) })); return response.ok; }
 async function issueCustody(request: Request, env: Env, actor: UserRow, subjectType: 'user' | 'tenant', subjectUserId: string, tenantId: string, recipientValue: unknown, locale: Locale) { const recipient = emailOf(recipientValue); if (!recipient || !(await canManageTenant(env, actor, tenantId))) return responseJson({ ok: false, error: 'forbidden' }, 403); const rawToken = randomToken(36); const now = Date.now(); const id = `custody_${crypto.randomUUID()}`; await env.DB.batch([env.DB.prepare("UPDATE custody_invitations SET status = 'revoked' WHERE subject_type = ? AND subject_user_id = ? AND status = 'pending'").bind(subjectType, subjectUserId), env.DB.prepare('INSERT INTO custody_invitations (id, subject_type, subject_user_id, tenant_id, recipient_email, token_hash, status, created_by, expires_at, accepted_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?)').bind(id, subjectType, subjectUserId, tenantId, recipient, await hashed(rawToken), 'pending', actor.id, now + 72 * 60 * 60 * 1000, now)]); const delivered = await sendCustodyInvitation(env, recipient, rawToken, locale, subjectType); await auditSovereignty(env, request, actor.id, tenantId, `${subjectType}_custody_invited`, subjectType, subjectUserId, { invitationId: id, delivered }); return responseJson({ ok: true, delivered }, 202); }
 async function custodyAccept(request: Request, env: Env) {
-  if (!sameOrigin(request)) return responseJson({ ok: false, error: 'invalid_request' }, 403);
-  const input = record(await request.json().catch(() => ({}))); const rawToken = typeof input.token === 'string' ? input.token : ''; const pin = pinOf(input.pin); if (!rawToken || !pin) return responseJson({ ok: false, error: 'invalid_input' }, 400);
-  const now = Date.now(); const invitation = await env.DB.prepare("SELECT id, subject_type, subject_user_id, tenant_id, recipient_email FROM custody_invitations WHERE token_hash = ? AND status = 'pending' AND expires_at > ?").bind(await hashed(rawToken), now).first<{ id: string; subject_type: 'user' | 'tenant'; subject_user_id: string; tenant_id: string; recipient_email: string }>(); if (!invitation) return responseJson({ ok: false, error: 'custody_invalid' }, 400);
-  let pinRecord: { salt: string; hash: string }; try { pinRecord = await createPinRecord(pin, invitation.subject_user_id, env); } catch { return responseJson({ ok: false, error: 'custody_unavailable' }, 503); }
-  const conflict = await env.DB.prepare('SELECT id FROM users WHERE email = ? AND id != ?').bind(invitation.recipient_email, invitation.subject_user_id).first<{ id: string }>(); if (conflict) return responseJson({ ok: false, error: 'email_in_use' }, 409);
-  const changed = await env.DB.batch([env.DB.prepare("UPDATE custody_invitations SET status = 'accepted', accepted_at = ? WHERE id = ? AND status = 'pending'").bind(now, invitation.id), env.DB.prepare('UPDATE users SET email = ?, pin_hash = ?, pin_salt = ?, pin_set_at = ?, email_verified_at = ?, status = ?, is_managed = 0, managed_by_user_id = NULL, custody_transfer_email = NULL, custody_token_hash = NULL, custody_token_expires = NULL WHERE id = ?').bind(invitation.recipient_email, pinRecord.hash, pinRecord.salt, now, now, 'active', invitation.subject_user_id), env.DB.prepare('UPDATE auth_sessions SET revoked_at = ? WHERE user_id = ? AND revoked_at IS NULL').bind(now, invitation.subject_user_id)]); if (!changed[0]?.meta.changes) return responseJson({ ok: false, error: 'custody_invalid' }, 409);
-  const user = await env.DB.prepare('SELECT id, permanent_id, name, role, wallet_balance, email_verified_at, status, pin_hash, pin_salt, failed_login_attempts, locked_until FROM users WHERE id = ?').bind(invitation.subject_user_id).first<UserRow>(); if (!user) return responseJson({ ok: false, error: 'custody_invalid' }, 409); await auditSovereignty(env, request, user.id, invitation.tenant_id, `${invitation.subject_type}_custody_accepted`, invitation.subject_type, invitation.subject_user_id, { invitationId: invitation.id }); const issued = await issueSession(env, user, true); return withCookies(responseJson({ ok: true, user: issued.user }), issued.cookies);
+  if(!sameOrigin(request))return responseJson({ok:false,error:'invalid_request'},403);
+  const input=record(await request.json().catch(()=>({})));const token=typeof input.token==='string'?input.token:'';const pin=pinOf(input.pin);
+  if(!/^[A-Za-z0-9_-]{40,80}$/.test(token)||!pin||input.termsAccepted!==true||input.privacyAccepted!==true||input.eligibilityAccepted!==true)return responseJson({ok:false,error:'invalid_input'},400);
+  if(await limited(env,request,'custody',await hashed(token),6,900))return responseJson({ok:false,error:'limited'},429);
+  const now=Date.now();const i=await env.DB.prepare("SELECT id,subject_type,subject_user_id,tenant_id,recipient_email FROM custody_invitations WHERE token_hash=? AND status='pending' AND expires_at>?").bind(await hashed(token),now).first<{id:string;subject_type:string;subject_user_id:string;tenant_id:string;recipient_email:string}>();if(!i)return responseJson({ok:false,error:'custody_invalid'},409);
+  if(await env.DB.prepare('SELECT id FROM users WHERE email=? AND id!=?').bind(i.recipient_email,i.subject_user_id).first())return responseJson({ok:false,error:'email_in_use'},409);
+  try {
+    const record=await createPinRecord(pin,i.subject_user_id,env);
+    const commands=[claimStatement(env.DB,`custody:${i.id}`,i.subject_user_id,i.id,"EXISTS(SELECT 1 FROM custody_invitations WHERE id=? AND status='pending' AND expires_at>?)",[i.id,Date.now()]),
+      env.DB.prepare("UPDATE custody_invitations SET status='accepted',accepted_at=? WHERE id=?").bind(now,i.id),
+      env.DB.prepare("UPDATE users SET email=?,pin_hash=?,pin_salt=?,pin_set_at=?,email_verified_at=?,status='active',is_managed=0,managed_by_user_id=NULL,custody_transfer_email=NULL,custody_token_hash=NULL,custody_token_expires=NULL,terms_accepted_at=?,privacy_accepted_at=?,eligibility_acknowledged_at=? WHERE id=?").bind(i.recipient_email,record.hash,record.salt,now,now,now,now,now,i.subject_user_id),
+      env.DB.prepare('UPDATE auth_sessions SET revoked_at=? WHERE user_id=? AND revoked_at IS NULL').bind(now,i.subject_user_id),
+      env.DB.prepare('UPDATE trusted_devices SET revoked_at=? WHERE user_id=? AND revoked_at IS NULL').bind(now,i.subject_user_id),
+      env.DB.prepare('INSERT INTO consent_events(id,user_id,actor_id,kind,policy_version,created_at) VALUES (?,?,?,?,?,?)').bind(crypto.randomUUID(),i.subject_user_id,i.subject_user_id,'custody_acceptance','2026-11-18',now),
+      env.DB.prepare("INSERT INTO audit_logs(id,tenant_id,actor_id,action,target_type,target_id,created_at) VALUES (?,?,?,'custody_accepted','custody_invitation',?,?)").bind(crypto.randomUUID(),i.tenant_id,i.subject_user_id,i.id,now)];
+    await env.DB.batch(commands);
+    const user=await env.DB.prepare('SELECT id,permanent_id,name,role,wallet_balance,email_verified_at,status,pin_hash,pin_salt,failed_login_attempts,locked_until FROM users WHERE id=?').bind(i.subject_user_id).first<UserRow>();
+    if(!user)return responseJson({ok:false,error:'custody_invalid'},409);
+    const issued=await issueSession(env,user,true);return withCookies(responseJson({ok:true,user:issued.user}),issued.cookies);
+  }catch{return responseJson({ok:false,error:'custody_invalid'},409);}
 }
 
 async function platformContext(request: Request, env: Env) { const tenant = await tenantForRequest(request, env); if (!tenant) return responseJson({ ok: false, error: 'not_found' }, 404); return responseJson({ ok: true, tenant: { slug: tenant.slug, name: tenant.name_ar, nameEn: tenant.name_en, logoUrl: tenant.logo_url, coverUrl: tenant.cover_url, type: tenant.tenant_type } }); }
+async function supervisorOverview(request: Request, env: Env) {
+  const actor=await authUser(request,env);if(!actor)return responseJson({ok:false,error:'unauthorized'},401);if(actor.role!=='moderator')return responseJson({ok:false,error:'forbidden'},403);
+  const scopes=await env.DB.prepare('SELECT t.id,t.name_ar,t.name_en FROM moderator_assignments m JOIN tenants t ON t.id=m.tenant_id WHERE m.user_id=?').bind(actor.id).all<{id:string;name_ar:string;name_en:string}>();
+  const response=await adminPublishRequests(request,env);const data=await response.json() as {requests:unknown[]};return responseJson({ok:true,scopes:scopes.results??[],requests:data.requests??[]});
+}
+
 async function sovereignOverview(request: Request, env: Env) { const actor = await authUser(request, env); if (!actor) return responseJson({ ok: false, error: 'unauthorized' }, 401); if (actor.role !== 'super_admin') return responseJson({ ok: false, error: 'forbidden' }, 403); const [treasury, reviews, audits, partners] = await Promise.all([setting(env, 'treasury_balance'), env.DB.prepare("SELECT r.id, p.slug, u.name AS owner_name, t.name_ar AS tenant_name FROM publish_requests r JOIN profiles p ON p.id = r.profile_id JOIN users u ON u.id = r.user_id JOIN tenants t ON t.id = r.tenant_id WHERE r.status = 'pending' ORDER BY r.submitted_at LIMIT 50").all<{ id: string; slug: string; owner_name: string; tenant_name: string }>(), env.DB.prepare('SELECT id, action, created_at FROM audit_logs ORDER BY created_at DESC LIMIT 50').all<{ id: string; action: string; created_at: number }>(), env.DB.prepare("SELECT id, slug, name_ar, status FROM tenants WHERE tenant_type = 'partner' ORDER BY created_at DESC LIMIT 50").all<{ id: string; slug: string; name_ar: string; status: string }>()]); return responseJson({ ok: true, overview: { lockEnabled: (await setting(env, 'site_lock_enabled')) === '1', treasuryBalance: Number(treasury ?? '0'), reviews: (reviews.results ?? []).map(r => ({ id:r.id, slug:r.slug, ownerName:r.owner_name, tenantName:r.tenant_name })), audits: (audits.results ?? []).map(a=>({ id:a.id, action:a.action, createdAt:a.created_at })), partners: (partners.results ?? []).map(p=>({ id:p.id, slug:p.slug, name:p.name_ar, status:p.status })) } }); }
 async function sovereignLock(request: Request, env: Env) { if (!sameOrigin(request)) return responseJson({ ok:false,error:'invalid_request' },403); const actor=await authUser(request,env); if(!actor||actor.role!=='super_admin') return responseJson({ok:false,error:'forbidden'},403); const input=record(await request.json().catch(()=>({}))); if(!(await requireStepUpPin(env, actor, input.stepUpPin))) return responseJson({ok:false,error:'step_up_required'},401); const enabled=input.enabled===true; const password=typeof input.password==='string'?input.password:''; if(password&&password.length<8)return responseJson({ok:false,error:'invalid_input'},400); const now=Date.now(); const commands=[env.DB.prepare('UPDATE system_settings SET value = ?, updated_at = ? WHERE key = ?').bind(enabled?'1':'0',now,'site_lock_enabled')]; if(password){const salt=toBase64(crypto.getRandomValues(new Uint8Array(16)));commands.push(env.DB.prepare('UPDATE system_settings SET value = ?, updated_at = ? WHERE key = ?').bind(toBase64(await deriveSecretHash(password,salt)),now,'site_lock_password_hash'),env.DB.prepare('UPDATE system_settings SET value = ?, updated_at = ? WHERE key = ?').bind(salt,now,'site_lock_password_salt'));} await env.DB.batch(commands); await auditSovereignty(env,request,actor.id,'tenant_main','platform_lock_updated','setting','site_lock_enabled',{enabled}); return responseJson({ok:true}); }
 
-async function sovereignCreate(request: Request, env: Env, kind: 'supervisor'|'managed'|'partner') { if(!sameOrigin(request))return responseJson({ok:false,error:'invalid_request'},403); const actor=await authUser(request,env);if(!actor||actor.role!=='super_admin')return responseJson({ok:false,error:'forbidden'},403);const input=record(await request.json().catch(()=>({})));if(!(await requireStepUpPin(env,actor,input.stepUpPin)))return responseJson({ok:false,error:'step_up_required'},401);const locale=localeOf(input.locale);if(kind==='partner'){const slug=tenantSlugOf(input.slug), name=textOf(input.name,120), email=emailOf(input.email);if(!slug||!name||!email)return responseJson({ok:false,error:'invalid_input'},400);const existing=await env.DB.prepare('SELECT id FROM tenants WHERE slug=?').bind(slug).first<{id:string}>();if(existing)return responseJson({ok:false,error:'slug_taken'},409);const tenantId=`tenant_${crypto.randomUUID()}`;await env.DB.prepare('INSERT INTO tenants (id,slug,name_ar,name_en,logo_url,cover_url,description_ar,description_en,theme_config_json,status,owner_user_id,assigned_moderator_id,is_managed_by_admin,custody_transfer_email,custody_token_hash,custody_token_expires,created_by,created_at,approved_by,approved_at,tenant_type,requested_at,request_reason,updated_at) VALUES (?, ?, ?, ?, NULL,NULL,NULL,NULL,?, ?, NULL,NULL,1,NULL,NULL,NULL,?,?,?, ?, ?, ?,NULL,?)').bind(tenantId,slug,name,name,'{}','active',actor.id,Date.now(),actor.id,Date.now(),'partner',Date.now(),Date.now()).run();const created=await managedAccount(env,request,actor,tenantId,name,email,slug,'adheed');if(!created)return responseJson({ok:false,error:'creation_failed'},409);await env.DB.prepare('UPDATE tenants SET owner_user_id=? WHERE id=?').bind(created.id,tenantId).run();return issueCustody(request,env,actor,'tenant',created.id,tenantId,email,locale);}const result=await managedAccount(env,request,actor,'tenant_main',input.name,input.email,input.slug,kind==='supervisor'?'moderator':'user');if(!result)return responseJson({ok:false,error:'creation_failed'},409);if(kind==='supervisor')await env.DB.prepare('UPDATE tenants SET assigned_moderator_id = ?, updated_at = ? WHERE id = ?').bind(result.id,Date.now(),'tenant_main').run();return issueCustody(request,env,actor,'user',result.id,'tenant_main',result.email,locale); }
+async function sovereignCreate(request: Request, env: Env, kind: 'supervisor'|'managed'|'partner') { if(!sameOrigin(request))return responseJson({ok:false,error:'invalid_request'},403); const actor=await authUser(request,env);if(!actor||actor.role!=='super_admin')return responseJson({ok:false,error:'forbidden'},403);const input=record(await request.json().catch(()=>({})));if(!(await requireStepUpPin(env,actor,input.stepUpPin)))return responseJson({ok:false,error:'step_up_required'},401);const locale=localeOf(input.locale);if(kind==='partner'){const slug=tenantSlugOf(input.slug), name=textOf(input.name,120), email=emailOf(input.email);if(!slug||!name||!email)return responseJson({ok:false,error:'invalid_input'},400);const existing=await env.DB.prepare('SELECT id FROM tenants WHERE slug=?').bind(slug).first<{id:string}>();if(existing)return responseJson({ok:false,error:'slug_taken'},409);const tenantId=`tenant_${crypto.randomUUID()}`;await env.DB.prepare('INSERT INTO tenants (id,slug,name_ar,name_en,logo_url,cover_url,description_ar,description_en,theme_config_json,status,owner_user_id,assigned_moderator_id,is_managed_by_admin,custody_transfer_email,custody_token_hash,custody_token_expires,created_by,created_at,approved_by,approved_at,tenant_type,requested_at,request_reason,updated_at) VALUES (?, ?, ?, ?, NULL,NULL,NULL,NULL,?, ?, NULL,NULL,1,NULL,NULL,NULL,?,?,?, ?, ?, ?,NULL,?)').bind(tenantId,slug,name,name,'{}','active',actor.id,Date.now(),actor.id,Date.now(),'partner',Date.now(),Date.now()).run();const created=await managedAccount(env,request,actor,tenantId,name,email,slug,'adheed');if(!created)return responseJson({ok:false,error:'creation_failed'},409);await env.DB.prepare('UPDATE tenants SET owner_user_id=? WHERE id=?').bind(created.id,tenantId).run();return issueCustody(request,env,actor,'tenant',created.id,tenantId,email,locale);}const result=await managedAccount(env,request,actor,'tenant_main',input.name,input.email,input.slug,kind==='supervisor'?'moderator':'user');if(!result)return responseJson({ok:false,error:'creation_failed'},409);if(kind==='supervisor')await env.DB.prepare('INSERT INTO moderator_assignments(user_id,tenant_id,assigned_by,created_at) VALUES (?,?,?,?)').bind(result.id,'tenant_main',actor.id,Date.now()).run();return issueCustody(request,env,actor,'user',result.id,'tenant_main',result.email,locale); }
 
 async function requestPartner(request: Request, env: Env) { if(!sameOrigin(request))return responseJson({ok:false,error:'invalid_request'},403);const actor=await authUser(request,env);if(!actor)return responseJson({ok:false,error:'unauthorized'},401);const input=record(await request.json().catch(()=>({})));const slug=tenantSlugOf(input.slug),name=textOf(input.name,120);if(!slug||!name)return responseJson({ok:false,error:'invalid_input'},400);const existing=await env.DB.prepare('SELECT id FROM tenants WHERE slug=?').bind(slug).first<{id:string}>();if(existing)return responseJson({ok:false,error:'slug_taken'},409);const now=Date.now();await env.DB.prepare('INSERT INTO tenants (id,slug,name_ar,name_en,logo_url,cover_url,description_ar,description_en,theme_config_json,status,owner_user_id,assigned_moderator_id,is_managed_by_admin,custody_transfer_email,custody_token_hash,custody_token_expires,created_by,created_at,approved_by,approved_at,tenant_type,requested_at,request_reason,updated_at) VALUES (?, ?, ?, ?, NULL,NULL,NULL,NULL,?, ?, ?,NULL,0,NULL,NULL,NULL,?,?,NULL,NULL,?,?,NULL,?)').bind(`tenant_${crypto.randomUUID()}`,slug,name,name,'{}','pending',actor.id,actor.id,now,'partner',now,now).run();await auditSovereignty(env,request,actor.id,'tenant_main','partner_requested','tenant',slug,{});return responseJson({ok:true},202); }
 async function approvePartner(request: Request, env: Env, id: string) { if(!sameOrigin(request))return responseJson({ok:false,error:'invalid_request'},403);const actor=await authUser(request,env);if(!actor||actor.role!=='super_admin')return responseJson({ok:false,error:'forbidden'},403);const input=record(await request.json().catch(()=>({})));if(!(await requireStepUpPin(env,actor,input.stepUpPin)))return responseJson({ok:false,error:'step_up_required'},401);const partner=await env.DB.prepare("SELECT owner_user_id FROM tenants WHERE id=? AND tenant_type='partner' AND status='pending'").bind(id).first<{owner_user_id:string|null}>();if(!partner)return responseJson({ok:false,error:'not_found'},404);await env.DB.batch([env.DB.prepare("UPDATE tenants SET status='active',approved_by=?,approved_at=?,updated_at=? WHERE id=?").bind(actor.id,Date.now(),Date.now(),id),partner.owner_user_id?env.DB.prepare("UPDATE users SET role='adheed' WHERE id=?").bind(partner.owner_user_id):env.DB.prepare('SELECT 1')]);await auditSovereignty(env,request,actor.id,id,'partner_approved','tenant',id,{});return responseJson({ok:true}); }
 
 async function partnerOverview(request: Request, env: Env) { const actor=await authUser(request,env);if(!actor)return responseJson({ok:false,error:'unauthorized'},401);const tenant=await env.DB.prepare("SELECT id,slug,name_ar,logo_url,cover_url FROM tenants WHERE owner_user_id=? AND tenant_type='partner' AND status='active' LIMIT 1").bind(actor.id).first<{id:string;slug:string;name_ar:string;logo_url:string|null;cover_url:string|null}>();if(!tenant||!(await canManageTenant(env,actor,tenant.id)))return responseJson({ok:false,error:'forbidden'},403);const [users,reviews]=await Promise.all([env.DB.prepare('SELECT permanent_id,name,email,is_managed FROM users WHERE tenant_id=? ORDER BY created_at DESC LIMIT 100').bind(tenant.id).all<{permanent_id:string;name:string;email:string;is_managed:number}>(),env.DB.prepare("SELECT r.id,p.slug,u.name AS owner_name FROM publish_requests r JOIN profiles p ON p.id=r.profile_id JOIN users u ON u.id=r.user_id WHERE r.tenant_id=? AND r.status='pending' ORDER BY r.submitted_at").bind(tenant.id).all<{id:string;slug:string;owner_name:string}>()]);return responseJson({ok:true,overview:{tenant:{slug:tenant.slug,name:tenant.name_ar,logoUrl:tenant.logo_url??undefined,coverUrl:tenant.cover_url??undefined},users:(users.results??[]).map(u=>({permanentId:u.permanent_id,name:u.name,email:u.email,isManaged:Boolean(u.is_managed)})),reviews:(reviews.results??[]).map(r=>({id:r.id,slug:r.slug,ownerName:r.owner_name}))}}); }
 async function partnerManaged(request: Request, env: Env) { if(!sameOrigin(request))return responseJson({ok:false,error:'invalid_request'},403);const actor=await authUser(request,env);if(!actor)return responseJson({ok:false,error:'unauthorized'},401);const tenant=await env.DB.prepare("SELECT id FROM tenants WHERE owner_user_id=? AND tenant_type='partner' AND status='active' LIMIT 1").bind(actor.id).first<{id:string}>();if(!tenant)return responseJson({ok:false,error:'forbidden'},403);const input=record(await request.json().catch(()=>({})));if(!(await requireStepUpPin(env,actor,input.stepUpPin)))return responseJson({ok:false,error:'step_up_required'},401);const result=await managedAccount(env,request,actor,tenant.id,input.name,input.email,input.slug,'user');if(!result)return responseJson({ok:false,error:'creation_failed'},409);return issueCustody(request,env,actor,'user',result.id,tenant.id,result.email,localeOf(input.locale)); }
+
+async function updateContact(request: Request,env: Env) {
+  if(!sameOrigin(request))return responseJson({ok:false,error:'invalid_request'},403);
+  const user=await authUser(request,env);if(!user)return responseJson({ok:false,error:'unauthorized'},401);
+  const input=record(await request.json().catch(()=>({})));if(!(await requireStepUpPin(env,user,input.pin)))return responseJson({ok:false,error:'step_up_required'},401);
+  const name=textOf(input.name,120),email=emailOf(input.email),phone=phoneOf(input.phone),whatsapp=phoneOf(input.whatsapp);if(!name||!email||phone===null||whatsapp===null)return responseJson({ok:false,error:'invalid_input'},400);
+  const old=await env.DB.prepare('SELECT email FROM users WHERE id=?').bind(user.id).first<{email:string}>();if(!old)return responseJson({ok:false,error:'unauthorized'},401);
+  if(email!==old.email){
+    if(await env.DB.prepare('SELECT 1 FROM users WHERE email=? AND id!=?').bind(email,user.id).first())return responseJson({ok:false,error:'email_in_use'},409);
+    if(await limited(env,request,'contact-email',user.id,3,900))return responseJson({ok:false,error:'limited'},429);
+    const code=await createChallenge(env,request,email,user.id,'login',localeOf(input.locale));const c=await env.DB.prepare("SELECT id FROM auth_challenges WHERE email=? AND user_id=? AND purpose='login' AND consumed_at IS NULL ORDER BY created_at DESC LIMIT 1").bind(email,user.id).first<{id:string}>();if(!c)return responseJson({ok:false,error:'verification_unavailable'},503);
+    const id=`contact_${crypto.randomUUID()}`;const now=Date.now();await env.DB.prepare('INSERT INTO contact_changes(id,user_id,challenge_id,new_email,payload_cipher,expires_at,created_at) VALUES (?,?,?,?,?,?,?)').bind(id,user.id,c.id,email,await secretBox(JSON.stringify({name,phone,whatsapp}),env.DATA_ENCRYPTION_KEY),now+CHALLENGE_MS,now).run();
+    if(!(await sendCode(env,email,code,localeOf(input.locale))))return responseJson({ok:false,error:'delivery_failed'},503);
+    return responseJson({ok:true,verificationRequired:true,changeId:id},202);
+  }
+  await env.DB.batch([env.DB.prepare('UPDATE users SET name=?,phone=?,whatsapp=? WHERE id=?').bind(name,phone,whatsapp,user.id),env.DB.prepare("INSERT INTO audit_logs(id,actor_id,action,target_type,target_id,created_at) VALUES (?,?,'contact_corrected','user',?,?)").bind(crypto.randomUUID(),user.id,user.id,Date.now())]);
+  return responseJson({ok:true,contact:{name,email,phone,whatsapp}});
+}
+async function verifyContact(request:Request,env:Env){
+ if(!sameOrigin(request))return responseJson({ok:false,error:'invalid_request'},403);const user=await authUser(request,env);if(!user)return responseJson({ok:false,error:'unauthorized'},401);
+ const input=record(await request.json().catch(()=>({})));if(!(await requireStepUpPin(env,user,input.pin)))return responseJson({ok:false,error:'step_up_required'},401);const code=pinOf(input.code);const id=textOf(input.changeId,100);if(!code||!id)return responseJson({ok:false,error:'invalid_input'},400);
+ const change=await env.DB.prepare('SELECT challenge_id,new_email,payload_cipher FROM contact_changes WHERE id=? AND user_id=? AND completed_at IS NULL AND expires_at>?').bind(id,user.id,Date.now()).first<{challenge_id:string;new_email:string;payload_cipher:string}>();if(!change)return responseJson({ok:false,error:'challenge_expired'},409);
+ const checked=await consumeChallenge(env,change.new_email,code,'login');if(!checked.ok||checked.challenge.id!==change.challenge_id)return responseJson({ok:false,error:'invalid_code'},401);
+ const data=JSON.parse(await openBox(change.payload_cipher,env.DATA_ENCRYPTION_KEY));const now=Date.now();
+ try{await env.DB.batch([challengeClaim(env,checked.challenge),env.DB.prepare('UPDATE auth_challenges SET consumed_at=? WHERE id=?').bind(now,checked.challenge.id),env.DB.prepare('UPDATE users SET name=?,email=?,phone=?,whatsapp=?,email_verified_at=? WHERE id=?').bind(data.name,change.new_email,data.phone,data.whatsapp,now,user.id),env.DB.prepare('UPDATE contact_changes SET completed_at=? WHERE id=?').bind(now,id),env.DB.prepare('UPDATE trusted_devices SET revoked_at=? WHERE user_id=?').bind(now,user.id),env.DB.prepare('UPDATE auth_sessions SET revoked_at=? WHERE user_id=? AND token_hash!=?').bind(now,user.id,await hashed(cookie(request,'vipdid_session')??'')),env.DB.prepare("INSERT INTO audit_logs(id,actor_id,action,target_type,target_id,created_at) VALUES (?,?,'email_change_verified','user',?,?)").bind(crypto.randomUUID(),user.id,user.id,now)]);}catch{return responseJson({ok:false,error:'verification_unavailable'},409);}
+ return responseJson({ok:true,contact:{name:data.name,email:change.new_email,phone:data.phone,whatsapp:data.whatsapp}});
+}
+async function accountPrivacy(request:Request,env:Env){const user=await authUser(request,env);if(!user)return responseJson({ok:false,error:'unauthorized'},401);return responseJson(await privacyOverview(env,user.id));}
+async function submitPrivacy(request:Request,env:Env){if(!sameOrigin(request))return responseJson({ok:false,error:'invalid_request'},403);const user=await authUser(request,env);if(!user)return responseJson({ok:false,error:'unauthorized'},401);const input=record(await request.json().catch(()=>({})));if(!(await requireStepUpPin(env,user,input.pin)))return responseJson({ok:false,error:'step_up_required'},401);const data=await privacyRequest(env,user,input);return responseJson(data,data.ok?200:409);}
+async function adminPrivacy(request:Request,env:Env,id?:string){const user=await authUser(request,env);if(!user)return responseJson({ok:false,error:'unauthorized'},401);if(user.role!=='super_admin')return responseJson({ok:false,error:'forbidden'},403);if(!id)return responseJson(await reviewPrivacyRequests(env));if(!sameOrigin(request))return responseJson({ok:false,error:'invalid_request'},403);const input=record(await request.json().catch(()=>({})));if(!(await requireStepUpPin(env,user,input.pin)))return responseJson({ok:false,error:'step_up_required'},401);const data=await decidePrivacyRequest(env,user,id,input);return responseJson(data,data.ok?200:409);}
 
 async function me(request: Request, env: Env) { const user = await authUser(request, env); return responseJson({ ok: true, authenticated: Boolean(user), user: user ? userView(user) : null }); }
 async function logout(request: Request, env: Env) { if (!sameOrigin(request)) return responseJson({ ok: false, error: 'invalid_request' }, 403); const token = cookie(request, 'vipdid_session'); if (token) await env.DB.prepare('UPDATE auth_sessions SET revoked_at = ? WHERE token_hash = ? AND revoked_at IS NULL').bind(Date.now(), await hashed(token)).run(); return withCookies(responseJson({ ok: true }), [clearCookie('vipdid_session'), clearCookie('vipdid_device')]); }
@@ -573,9 +751,21 @@ function staticAsset(pathname: string) { const key = pathname === '/' ? 'index.h
 function routeSlug(pathname: string) { const value = decodeURIComponent(pathname.replace(/^\/+|\/+$/g, '')); return slugOf(value); }
 
 export default {
+  async scheduled(_controller:ScheduledController,env:Env,ctx:ExecutionContext){ctx.waitUntil(runMaintenance(env,id=>deliverOutbox(env,id)));},
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
-    if (url.pathname === '/api/health') return responseJson({ ok: true, service: 'vipdid' });
+    if(env.ENVIRONMENT==='staging'&&(!env.STAGING_ACCESS_KEY||!equal(encoder.encode(request.headers.get('authorization')??''),encoder.encode(`Bearer ${env.STAGING_ACCESS_KEY}`))))return responseJson({ok:false,error:'private_environment'},403);
+    if (url.pathname.startsWith('/api/admin/security/')) {
+      const actor=await authUser(request,env);if(!actor)return responseJson({ok:false,error:'unauthorized'},401);if(!['super_admin','moderator','adheed'].includes(actor.role))return responseJson({ok:false,error:'forbidden'},403);
+      try{const result=await adminSecurity(request,env,actor.id,value=>requireStepUpPin(env,actor,value));return responseJson(result,result.ok?200:401);}catch{return responseJson({ok:false,error:'security_unavailable'},503);}
+    }
+    if (url.pathname.startsWith('/api/admin/') || url.pathname.startsWith('/api/partner/')) {
+      const actor=await authUser(request,env);if(!actor)return responseJson({ok:false,error:'unauthorized'},401);if(!['super_admin','moderator','adheed'].includes(actor.role))return responseJson({ok:false,error:'forbidden'},403);
+      if(!(await adminMfaVerified(request,env,actor.id)))return responseJson({ok:false,error:'mfa_required'},403);
+    }
+    if (url.pathname === '/api/admin/review/overview' && request.method === 'GET') return supervisorOverview(request,env);
+    if (url.pathname.startsWith('/api/admin/publish-requests/') && url.pathname.endsWith('/preview') && request.method === 'GET') return reviewPreview(request,env,decodeURIComponent(url.pathname.slice('/api/admin/publish-requests/'.length,-'/preview'.length)));
+    if (url.pathname === '/api/health') { try { await env.DB.prepare('SELECT 1').first(); return responseJson({ok:true,service:'vipdid',database:'available',release:'required-gap-repair-20261118'}); } catch { return responseJson({ok:false,service:'vipdid'},503); } }
     if (url.pathname === '/api/platform/context' && request.method === 'GET') return platformContext(request, env);
     if (url.pathname === '/api/lock/status' && request.method === 'GET') return responseJson({ locked: await locked(request, env) });
     if (url.pathname === '/api/lock/unlock' && request.method === 'POST') return unlock(request, env);
@@ -591,6 +781,12 @@ export default {
     if (url.pathname === '/api/auth/owner/start' && request.method === 'POST') return ownerStart(request, env);
     if (url.pathname === '/api/auth/owner/verify' && request.method === 'POST') return ownerVerify(request, env);
     if (url.pathname === '/api/auth/logout' && request.method === 'POST') return logout(request, env);
+    if(url.pathname==='/api/account/privacy'&&request.method==='GET')return accountPrivacy(request,env);
+    if(url.pathname==='/api/account/privacy/requests'&&request.method==='POST')return submitPrivacy(request,env);
+    if(url.pathname==='/api/account/contact'&&request.method==='PUT')return updateContact(request,env);
+    if(url.pathname==='/api/account/contact/verify'&&request.method==='POST')return verifyContact(request,env);
+    if(url.pathname==='/api/admin/privacy/requests'&&request.method==='GET')return adminPrivacy(request,env);
+    if(url.pathname.startsWith('/api/admin/privacy/requests/')&&url.pathname.endsWith('/decision')&&request.method==='POST')return adminPrivacy(request,env,decodeURIComponent(url.pathname.slice('/api/admin/privacy/requests/'.length,-'/decision'.length)));
     if (url.pathname === '/api/account/profile' && request.method === 'GET') return accountProfile(request, env);
     if (url.pathname === '/api/account/profile' && request.method === 'PUT') return saveAccountProfile(request, env);
     if (url.pathname === '/api/account/media' && request.method === 'POST') return uploadProfileMedia(request, env);
