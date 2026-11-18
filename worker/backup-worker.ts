@@ -22,6 +22,8 @@ export async function makeBackup(env:Env,bookmark:string|null=null){
  await env.BACKUPS.put(prefix+'manifest.enc',await secretBox(JSON.stringify(manifest),env.BACKUP_ENCRYPTION_KEY),{httpMetadata:{contentType:'application/octet-stream',cacheControl:'private,no-store'}});
  const summary={id,createdAt,tableCounts:Object.fromEntries(dump.tables.map(t=>[t.name,t.rows.length])),mediaCount:media.length,bookmark,digest:manifest.dbDigest};
  await env.BACKUPS.put(`catalog/${id}.json`,JSON.stringify(summary),{httpMetadata:{contentType:'application/json',cacheControl:'private,no-store'}});
+ const journal=await env.DB.prepare("SELECT 1 FROM sqlite_schema WHERE type='table' AND name='backup_runs'").first();
+ if(journal)await env.DB.prepare("INSERT INTO backup_runs(id,status,object_key,bookmark,metadata_json,started_at,completed_at) VALUES (?,'completed',?,?,?,?,?)").bind(id,prefix+'manifest.enc',bookmark,JSON.stringify(summary.tableCounts),createdAt,Date.now()).run();
  return summary;
 }
 export async function restoreToStaging(env:Env,id:string){

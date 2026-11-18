@@ -1,0 +1,53 @@
+{
+  "target": "production",
+  "database": "be117780-1c27-46c2-8f6d-d3aa03bc09c0",
+  "migration": "0009_required_gap_repair",
+  "executedAt": "2026-11-18T13:05:15.472Z",
+  "before": {
+    "users": 3,
+    "tenants": 1,
+    "profiles": 1,
+    "ledger": 3,
+    "wallet_total": 1200,
+    "treasury": "999999998800.0"
+  },
+  "after": {
+    "users": 3,
+    "tenants": 1,
+    "profiles": 1,
+    "ledger": 3,
+    "wallet_total": 1200,
+    "treasury": "999999998800.0"
+  },
+  "protectedRowsAndBalancesUnchanged": true,
+  "tables": [
+    "_cf_KV",
+    "admin_mfa",
+    "atomic_operations",
+    "audit_logs",
+    "auth_challenges",
+    "auth_sessions",
+    "backup_runs",
+    "consent_events",
+    "contact_changes",
+    "custody_invitations",
+    "deletion_tombstones",
+    "delivery_outbox",
+    "ledger_entries",
+    "media_assets",
+    "mfa_recovery_codes",
+    "moderator_assignments",
+    "notifications",
+    "operational_incidents",
+    "point_entitlements",
+    "point_grant_requests",
+    "privacy_requests",
+    "profiles",
+    "publish_requests",
+    "security_counters",
+    "system_settings",
+    "tenants",
+    "trusted_devices",
+    "users"
+  ]
+}

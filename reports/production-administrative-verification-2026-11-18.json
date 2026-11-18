@@ -1,0 +1,114 @@
+{
+  "executedAt": "2026-11-18T13:13:36.007Z",
+  "productionCounts": {
+    "users": 3,
+    "profiles": 1,
+    "ledger": 3,
+    "wallets": 1200,
+    "treasury": "999999998800.0",
+    "completed_backups": 1,
+    "latest_backup_at": 1795007604296
+  },
+  "deployment": {
+    "id": "ab9d09ea-4c10-450c-98c9-0b4d3f52cffe",
+    "source": "api",
+    "strategy": "percentage",
+    "author_email": "rijalalwatan.com@gmail.com",
+    "annotations": {
+      "workers/message": "Automatic deployment on upload.",
+      "workers/triggered_by": "upload"
+    },
+    "versions": [
+      {
+        "version_id": "642613a4-b5d2-4115-b846-eb9134a012a3",
+        "percentage": 100
+      }
+    ],
+    "created_on": "2026-11-18T13:05:32.335264Z"
+  },
+  "backupDeployment": {
+    "id": "05f65005-c2ed-4c75-a717-8653e920c376",
+    "source": "api",
+    "strategy": "percentage",
+    "author_email": "rijalalwatan.com@gmail.com",
+    "annotations": {
+      "workers/message": "Automatic deployment on upload.",
+      "workers/triggered_by": "upload"
+    },
+    "versions": [
+      {
+        "version_id": "5352afe7-4af0-4604-8213-5a0b78936a3c",
+        "percentage": 100
+      }
+    ],
+    "created_on": "2026-11-18T13:13:18.274662Z"
+  },
+  "bindings": [
+    {
+      "name": "BACKUPS",
+      "type": "r2_bucket"
+    },
+    {
+      "name": "DATA_ENCRYPTION_KEY",
+      "type": "secret_text"
+    },
+    {
+      "name": "DB",
+      "type": "d1"
+    },
+    {
+      "name": "EMAIL",
+      "type": "send_email"
+    },
+    {
+      "name": "ENVIRONMENT",
+      "type": "plain_text"
+    },
+    {
+      "name": "MEDIA",
+      "type": "r2_bucket"
+    },
+    {
+      "name": "PIN_PEPPER_SECRET",
+      "type": "secret_text"
+    },
+    {
+      "name": "RATE_LIMIT",
+      "type": "kv_namespace"
+    },
+    {
+      "name": "RESEND_API_KEY",
+      "type": "secret_text"
+    },
+    {
+      "name": "SESSION_SIGNING_KEY",
+      "type": "secret_text"
+    },
+    {
+      "name": "TURNSTILE_SECRET_KEY",
+      "type": "secret_text"
+    }
+  ],
+  "nativeCrons": [
+    {
+      "worker": "vipdid-platform",
+      "schedules": [
+        {
+          "cron": "*/15 * * * *",
+          "created_on": "2026-11-18T13:07:34.976174Z",
+          "modified_on": "2026-11-18T13:07:34.976174Z"
+        }
+      ]
+    },
+    {
+      "worker": "vipdid-backup-operations",
+      "schedules": [
+        {
+          "cron": "17 1 * * *",
+          "created_on": "2026-11-18T13:07:38.31154Z",
+          "modified_on": "2026-11-18T13:07:38.31154Z"
+        }
+      ]
+    }
+  ]
+}

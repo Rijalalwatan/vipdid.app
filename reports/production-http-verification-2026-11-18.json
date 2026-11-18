@@ -1,0 +1,77 @@
+{
+  "executedAt": "2026-11-18T13:08:02.849Z",
+  "results": [
+    {
+      "route": "/api/health",
+      "status": 200,
+      "payload": {
+        "ok": true,
+        "service": "vipdid",
+        "database": "available",
+        "release": "required-gap-repair-20261118"
+      }
+    },
+    {
+      "route": "/api/lock/status",
+      "status": 200
+    },
+    {
+      "route": "/api/account/wallet",
+      "status": 401
+    },
+    {
+      "route": "/api/account/privacy",
+      "status": 401
+    },
+    {
+      "route": "/api/admin/sovereign/overview",
+      "status": 401
+    },
+    {
+      "route": "/api/admin/review/overview",
+      "status": 401
+    },
+    {
+      "route": "/api/admin/privacy/requests",
+      "status": 401
+    },
+    {
+      "route": "/api/admin/operations",
+      "status": 401
+    },
+    {
+      "route": "/api/media/invalid",
+      "status": 404
+    },
+    {
+      "route": "/privacy",
+      "status": 200
+    },
+    {
+      "route": "/terms",
+      "status": 200
+    },
+    {
+      "route": "/assets/index-De9s7FuE.js",
+      "status": 200
+    },
+    {
+      "route": "/assets/index-u1Bf3gNs.css",
+      "status": 200
+    },
+    {
+      "origin": "https://vipdid-platform-staging.rijalalwatan-com.workers.dev",
+      "status": 403
+    },
+    {
+      "origin": "https://vipdid-backup-operations.rijalalwatan-com.workers.dev",
+      "status": 403
+    }
+  ],
+  "previewLockPreserved": true,
+  "cspPreserved": true,
+  "js": "/assets/index-De9s7FuE.js",
+  "css": "/assets/index-u1Bf3gNs.css",
+  "productionDataWritten": false,
+  "browserUsed": false
+}

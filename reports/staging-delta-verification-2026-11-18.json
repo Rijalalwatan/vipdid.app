@@ -1,0 +1,29 @@
+{
+  "executedAt": "2026-11-18T12:59:58.291Z",
+  "database": "e9c42d5e-180c-4ba8-882b-340b3534c7d5",
+  "count": 4,
+  "tests": [
+    {
+      "name": "new operations overview remains restricted to protected administrator",
+      "passed": true,
+      "elapsedMs": 3408
+    },
+    {
+      "name": "disabled staging preview lock uses no production KV binding",
+      "passed": true,
+      "elapsedMs": 567
+    },
+    {
+      "name": "verified email correction atomically consumes the prepared isolated OTP",
+      "passed": true,
+      "elapsedMs": 4365
+    },
+    {
+      "name": "finalized erasure completes and cannot be reversed by a later rejection",
+      "passed": true,
+      "elapsedMs": 7964
+    }
+  ],
+  "productionTouched": false,
+  "realEmailsSent": false
+}
